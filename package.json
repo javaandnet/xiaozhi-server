@@ -1,0 +1,28 @@
+{
+  "name": "xiaozhi-server",
+  "version": "1.0.0",
+  "description": "小智(Xiaozhi) 语音交互服务器 - 独立运行版（不依赖 galaclaw）",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node run-server.js",
+    "dev": "node --watch run-server.js"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^16.6.1",
+    "element-plus": "^2.14.6",
+    "express": "^4.22.1",
+    "node-edge-tts": "^1.2.10",
+    "node-lame": "^2.0.2",
+    "opusscript": "^0.1.1",
+    "uuid": "^13.0.0",
+    "vue": "^3.5.43",
+    "ws": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,9 @@
+node_modules/
+logs/
+tmp/
+data/
+funasr-runtime-resources/
+config.json
+config.json.bak*
+.env
+.DS_Store
