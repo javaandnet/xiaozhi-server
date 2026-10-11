@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: chat_client/utils
+title: 聊天客户端通用工具库
+scope:
+    - public/chat/js/utils/
+source_files: []
+depends_on: []
+related_to: []

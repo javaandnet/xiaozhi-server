@@ -1,0 +1,121 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: master
+nodes_managed: true
+exported_at: "2026-10-11T03:34:37Z"
+modules:
+    "":
+        dir_name: 小智语音交互服务器（独立运行版）
+        title: 小智语音交互服务器（独立运行版）
+        scope:
+            - index.js
+            - run-server.js
+            - package.json
+            - package-lock.json
+            - .gitignore
+            - .env.example
+        source_files: []
+        children:
+            - chat_client
+            - server_core
+            - studio_cli
+        depends_on: []
+        related_to: []
+    chat_client:
+        dir_name: 小智 Web 聊天客户端
+        title: 小智 Web 聊天客户端
+        scope:
+            - public/chat/
+        source_files: []
+        children:
+            - chat_client/app_bootstrap
+            - chat_client/core_audio
+            - chat_client/utils
+        depends_on: []
+        related_to:
+            - path: server_core
+            - path: server_core/models
+    chat_client/app_bootstrap:
+        dir_name: 聊天客户端应用启动与配置管理
+        title: 聊天客户端应用启动与配置管理
+        scope:
+            - public/chat/js/app.js
+            - public/chat/js/config/
+            - public/chat/index.html
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    chat_client/core_audio:
+        dir_name: Web端音频采集与流式播放核心
+        title: Web端音频采集与流式播放核心
+        scope:
+            - public/chat/js/core/audio/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    chat_client/utils:
+        dir_name: 聊天客户端通用工具库
+        title: 聊天客户端通用工具库
+        scope:
+            - public/chat/js/utils/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    server_core:
+        dir_name: 小智服务端核心运行时（core + config）
+        title: 小智服务端核心运行时（core + config）
+        scope:
+            - core/
+            - config/
+        source_files: []
+        children:
+            - server_core/managers
+            - server_core/models
+            - server_core/services
+        depends_on: []
+        related_to:
+            - path: chat_client
+    server_core/managers:
+        dir_name: 核心运行时管理器（设备_会话_任务_持久化）
+        title: 核心运行时管理器（设备/会话/任务/持久化）
+        scope:
+            - core/managers/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: studio_cli
+    server_core/models:
+        dir_name: 核心数据模型与消息类型常量
+        title: 核心数据模型与消息类型常量
+        scope:
+            - core/models/
+            - core/constants/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: chat_client
+    server_core/services:
+        dir_name: 语音与智能体服务层
+        title: 语音与智能体服务层
+        scope:
+            - core/services/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    studio_cli:
+        dir_name: Firmware Studio 固件工作台后端
+        title: Firmware Studio 固件工作台后端
+        scope:
+            - studio/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: server_core/managers

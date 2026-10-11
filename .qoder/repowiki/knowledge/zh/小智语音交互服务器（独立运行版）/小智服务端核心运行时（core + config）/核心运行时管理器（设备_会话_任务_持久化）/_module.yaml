@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: server_core/managers
+title: 核心运行时管理器（设备/会话/任务/持久化）
+scope:
+    - core/managers/
+source_files: []
+depends_on: []
+related_to:
+    - path: studio_cli

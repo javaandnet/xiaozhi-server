@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: chat_client
+title: 小智 Web 聊天客户端
+scope:
+    - public/chat/
+source_files: []
+depends_on: []
+related_to:
+    - path: server_core
+    - path: server_core/models

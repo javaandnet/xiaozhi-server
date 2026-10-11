@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: chat_client/core_audio
+title: Web端音频采集与流式播放核心
+scope:
+    - public/chat/js/core/audio/
+source_files: []
+depends_on: []
+related_to: []

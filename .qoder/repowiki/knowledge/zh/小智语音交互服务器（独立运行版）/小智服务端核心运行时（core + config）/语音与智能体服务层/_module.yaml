@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: server_core/services
+title: 语音与智能体服务层
+scope:
+    - core/services/
+source_files: []
+depends_on: []
+related_to: []

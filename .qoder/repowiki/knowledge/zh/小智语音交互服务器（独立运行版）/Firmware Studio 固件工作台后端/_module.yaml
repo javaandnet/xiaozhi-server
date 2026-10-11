@@ -1,0 +1,9 @@
+schema_version: 1
+module_path: studio_cli
+title: Firmware Studio 固件工作台后端
+scope:
+    - studio/
+source_files: []
+depends_on: []
+related_to:
+    - path: server_core/managers

@@ -1,0 +1,10 @@
+schema_version: 1
+module_path: chat_client/app_bootstrap
+title: 聊天客户端应用启动与配置管理
+scope:
+    - public/chat/js/app.js
+    - public/chat/js/config/
+    - public/chat/index.html
+source_files: []
+depends_on: []
+related_to: []

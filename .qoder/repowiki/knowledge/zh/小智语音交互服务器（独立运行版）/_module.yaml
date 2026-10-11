@@ -1,0 +1,13 @@
+schema_version: 1
+module_path: ""
+title: 小智语音交互服务器（独立运行版）
+scope:
+    - index.js
+    - run-server.js
+    - package.json
+    - package-lock.json
+    - .gitignore
+    - .env.example
+source_files: []
+depends_on: []
+related_to: []
