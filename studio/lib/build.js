@@ -32,6 +32,7 @@ export function startBuild(cfg, opts) {
   const flash8 = String(opts.flashSize || '') === '8MB'; // 8MB flash 设备：切 v2/8m 分区表
   const script = [
     'set -o pipefail',
+    'set -e',
     `echo "[xz-studio] 环境: 加载 ESP-IDF"` ,
     `export IDF_PYTHON_ENV_PATH=${shq(cfg.idfPythonEnv || (process.env.HOME + '/.espressif/python_env/idf6.1_py3.12_env'))}`,
     `source ${shq(cfg.idfExport)}`,

@@ -252,14 +252,36 @@ class SttService extends BaseService {
   }
 
   async _initAliyunStt() {
-    // 阿里云STT配置
+    // 阿里云百炼 DashScope Qwen3-ASR-Flash
+    // 走 OpenAI 兼容 chat/completions，base64 Data URL 同步识别（改动最小、无需文件上传/轮询）
     const config = this.providerConfig;
+    const region = config.region || process.env.ALIYUN_ASR_REGION || 'cn-beijing';
+    // workspaceId 用于业务空间专属域名；未提供则回退通用域名（通用域名仍可正常使用）
+    const workspaceId = config.workspaceId || process.env.ALIYUN_WORKSPACE_ID;
+    const defaultBase = workspaceId
+      ? `https://${workspaceId}.${region}.maas.aliyuncs.com/compatible-mode/v1`
+      : (region === 'ap-southeast-1'
+          ? 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
+          : 'https://dashscope.aliyuncs.com/compatible-mode/v1');
+
     this.aliyunConfig = {
-      accessKeyId: config.accessKeyId || process.env.ALIYUN_ACCESS_KEY_ID,
-      accessKeySecret: config.accessKeySecret || process.env.ALIYUN_ACCESS_KEY_SECRET,
-      appKey: config.appKey || process.env.ALIYUN_ASR_APP_KEY
+      apiKey: config.apiKey || config.api_key || process.env.DASHSCOPE_API_KEY || process.env.ALIYUN_API_KEY,
+      baseUrl: String(config.baseUrl || defaultBase).replace(/\/+$/, ''),
+      model: config.model || process.env.ALIYUN_ASR_MODEL || 'qwen3-asr-flash',
+      enableItn: config.enableItn === true,
+      // 已知语种时传入 language 提示以提升准确率；多语种混合场景应置 false
+      languageHint: config.languageHint !== false,
+      timeoutMs: config.timeoutMs || 30000,
     };
-    console.log(`[${this.name}] 阿里云STT初始化完成`);
+
+    if (!this.aliyunConfig.apiKey) {
+      console.warn(`[${this.name}] 阿里云Qwen-ASR缺少apiKey(DASHSCOPE_API_KEY)，将使用模拟模式`);
+      this.simulationMode = true;
+    } else {
+      this.simulationMode = false;
+    }
+
+    console.log(`[${this.name}] 阿里云Qwen-ASR初始化完成 (model=${this.aliyunConfig.model}, base=${this.aliyunConfig.baseUrl})`);
   }
 
   /**
@@ -1095,12 +1117,66 @@ class SttService extends BaseService {
   }
 
   /**
-   * 阿里云STT识别
+   * 阿里云 Qwen3-ASR-Flash 识别（OpenAI 兼容 chat/completions，base64 同步）
    */
   async _recognizeWithAliyun(pcmData, sessionId) {
-    // 简化实现 - 实际应调用阿里云API
+    if (this.simulationMode) {
+      return {
+        text: '这是模拟识别结果',
+        confidence: 0.9,
+        duration: Math.floor(pcmData.length / 32),
+        provider: 'aliyun',
+        sessionId
+      };
+    }
+
+    const langHint = (this.language || 'zh-CN').split('-')[0].toLowerCase();
+    const wav = this._pcmToWav(pcmData);
+    const dataUri = `data:audio/wav;base64,${wav.toString('base64')}`;
+
+    const asrOptions = { enable_itn: this.aliyunConfig.enableItn };
+    if (this.aliyunConfig.languageHint && langHint) {
+      asrOptions.language = langHint;
+    }
+
+    const body = {
+      model: this.aliyunConfig.model,
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'input_audio', input_audio: { data: dataUri } }]
+        }
+      ],
+      asr_options: asrOptions
+    };
+
+    const resp = await fetch(`${this.aliyunConfig.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.aliyunConfig.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.aliyunConfig.timeoutMs),
+    });
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '');
+      throw new Error(`阿里云Qwen-ASR HTTP ${resp.status}: ${t.slice(0, 200)}`);
+    }
+
+    const data = await resp.json();
+    const content = (data.choices?.[0]?.message?.content || '').trim();
+
+    // 与 funasr/aibridge 分支同构：text 为 JSON 字符串，parsed 供下游取 content/language
+    const parsed = {
+      content,
+      language: langHint || 'zh',
+      emotion: '😶'
+    };
     return {
-      text: '',
+      text: JSON.stringify(parsed, null, 2),
+      parsed,
+      rawText: content,
       confidence: 0.9,
       duration: Math.floor(pcmData.length / 32),
       provider: 'aliyun',
