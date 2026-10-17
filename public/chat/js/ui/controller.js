@@ -212,8 +212,15 @@ class UIController {
         const settingsBtn = document.getElementById('settingsBtn');
         if (settingsBtn) {
             settingsBtn.addEventListener('click', () => {
+                this.loadModeKeywords();
                 this.showModal('settingsModal');
             });
+        }
+
+        // 模式关键词保存
+        const modeKwSaveBtn = document.getElementById('modeKeywordsSaveBtn');
+        if (modeKwSaveBtn) {
+            modeKwSaveBtn.addEventListener('click', () => this.saveModeKeywords());
         }
 
         // Background switch button
@@ -682,6 +689,55 @@ class UIController {
         if (activeTabBtn && activeTabContent) {
             activeTabBtn.classList.add('active');
             activeTabContent.classList.add('active');
+        }
+    }
+
+    // 加载模式切换触发词（config.json → modeKeywords）
+    async loadModeKeywords() {
+        const fields = {
+            employeeOn: 'modeKwEmployeeOn',
+            employeeOff: 'modeKwEmployeeOff',
+            restOn: 'modeKwRestOn',
+            restOff: 'modeKwRestOff',
+        };
+        try {
+            const res = await fetch('/api/settings/mode-keywords');
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error || '加载失败');
+            for (const [key, id] of Object.entries(fields)) {
+                const el = document.getElementById(id);
+                if (el) el.value = (data.modeKeywords[key] || []).join('\n');
+            }
+        } catch (e) {
+            console.warn('[ModeKeywords] load failed:', e.message);
+        }
+    }
+
+    // 保存模式切换触发词（保存后服务端实时生效）
+    async saveModeKeywords() {
+        const status = document.getElementById('modeKeywordsStatus');
+        const toArray = (id) => (document.getElementById(id)?.value || '')
+            .split(/[\n,，、]/).map(s => s.trim()).filter(Boolean);
+        const payload = {
+            modeKeywords: {
+                employeeOn: toArray('modeKwEmployeeOn'),
+                employeeOff: toArray('modeKwEmployeeOff'),
+                restOn: toArray('modeKwRestOn'),
+                restOff: toArray('modeKwRestOff'),
+            }
+        };
+        try {
+            if (status) { status.textContent = '保存中…'; status.style.color = ''; }
+            const res = await fetch('/api/settings/mode-keywords', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error || '保存失败');
+            if (status) { status.textContent = '已保存，实时生效' + (data.persisted ? '' : '（未写入配置文件）'); status.style.color = 'green'; }
+        } catch (e) {
+            if (status) { status.textContent = `保存失败: ${e.message}`; status.style.color = 'red'; }
         }
     }
 

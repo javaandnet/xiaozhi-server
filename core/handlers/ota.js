@@ -208,11 +208,15 @@ class OTAHandler {
       const httpPort = serverConfig.http_port || serverConfig.port || 8003;
       const websocketPort = httpPort; // 使用HTTP端口作为WebSocket端口
       const localIp = this.getLocalIP();
+      // 设备固件(ota.cc)将 server_time.timezone_offset 按「分钟」解释（ts += offset*60*1000）。
+      // 这里 config.server.timezone_offset 以「小时」表示（如 9=UTC+9），未配置则取服务器本机真实时区偏移；下发前换算为分钟。
+      const tzOffsetHours = serverConfig.timezone_offset ?? -(new Date().getTimezoneOffset() / 60);
+      const timezoneOffset = Math.round(tzOffsetHours * 60);
 
       const returnJson = {
         server_time: {
           timestamp: Date.now(),
-          timezone_offset: serverConfig.timezone_offset || 8
+          timezone_offset: timezoneOffset
         },
         firmware: {
           version: deviceVersion,
@@ -272,6 +276,14 @@ class OTAHandler {
         };
 
         logger.info(`为设备 ${deviceId} 下发WebSocket配置: ${returnJson.websocket.url}`);
+
+        // GALA: deliver a server-managed backup websocket address (server1).
+        // The device tries url first, then url_fallback when the primary is unreachable.
+        const wsFallback = String(serverConfig.websocket_fallback || '').trim();
+        if (wsFallback && !wsFallback.includes('你的')) {
+          returnJson.websocket.url_fallback = wsFallback;
+          logger.info(`为设备 ${deviceId} 下发备用WebSocket地址(server1): ${wsFallback}`);
+        }
       }
 
       // 检查固件更新

@@ -150,6 +150,7 @@
                 <div class="settings-tabs">
                     <button class="tab-btn active" data-tab="device">设备配置</button>
                     <button class="tab-btn" data-tab="mcp">MCP工具</button>
+                    <button class="tab-btn" data-tab="mode">模式关键词</button>
                     <button class="tab-btn" data-tab="other">数字人皮肤</button>
                 </div>
 
@@ -209,6 +210,35 @@
                             <div class="mcp-actions">
                                 <!-- 添加新工具功能已取消 -->
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="modeTab">
+                    <div class="config-panel">
+                        <p style="margin:4px 0 10px;font-size:13px;opacity:.75;">
+                            唤醒设备后说出下列短语即可切换模式（每行一个，可自由定义；保存后实时生效）。<br>
+                            聊天=默认状态；办公=语音交给数字员工；休息=静默不应答。“退出休息”必须至少保留一个。
+                        </p>
+                        <div class="input-group">
+                            <label for="modeKwEmployeeOn">进入办公模式：</label>
+                            <textarea id="modeKwEmployeeOn" rows="3" placeholder="每行一个短语，如：进入办公模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwEmployeeOff">退出办公 / 回到聊天：</label>
+                            <textarea id="modeKwEmployeeOff" rows="3" placeholder="每行一个短语，如：退出办公模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwRestOn">进入休息模式（静默不应答）：</label>
+                            <textarea id="modeKwRestOn" rows="3" placeholder="每行一个短语，如：进入休息模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwRestOff">退出休息（恢复聊天）：</label>
+                            <textarea id="modeKwRestOff" rows="3" placeholder="每行一个短语，如：退出休息模式"></textarea>
+                        </div>
+                        <div class="input-group" style="display:flex;align-items:center;gap:12px;">
+                            <button class="tab-btn" id="modeKeywordsSaveBtn" style="min-width:90px;">保存</button>
+                            <span id="modeKeywordsStatus" style="font-size:13px;"></span>
                         </div>
                     </div>
                 </div>

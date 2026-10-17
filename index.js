@@ -12,6 +12,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { channelLogger } from './utils/logger.js';
 import { getConfig, getServerConfig, getSttConfig, getTtsConfig, getLlmConfig, getChannelInfo } from './config/loader.js';
+import { resolveMockFlags } from './core/utils/devMode.js';
 
 // 导入 xiaozhi 核心组件
 import { initializeWebSocketHandler, handleWebSocketConnection } from './core/handlers/websocket.js';
@@ -191,6 +192,13 @@ export class XiaozhiChannel extends EventEmitter {
       this.otaHandler.onDeviceReport = (info) => this.store.recordDevice(info);
 
       // 初始化服务
+      // Development mode: when mock is active for a segment, force that segment's
+      // provider to 'mock' (and attach the devMode payload) BEFORE constructing the
+      // service, so it takes the mock branch. this.config is the same reference the
+      // WebSocket handler reads (config: this.config), so the handler sees the override.
+      this.mockFlags = resolveMockFlags(this.config);
+      this._applyMockProviders(this.mockFlags);
+
       this.llmService = new LlmService(this.config.llm || getLlmConfig());
       this.ttsService = new TtsService(this.config.tts || getTtsConfig());
       this.sttService = new SttService(this.config.stt || getSttConfig());
@@ -217,11 +225,33 @@ export class XiaozhiChannel extends EventEmitter {
 
 
   /**
+   * Force a segment to the 'mock' provider when dev-mode mock is active for it.
+   * No-op for segments that stay real.
+   */
+  _applyMockProviders(flags) {
+    if (!flags || !flags.master) {
+      // master off: providers may already literally be 'mock' in config.json; nothing to rewrite
+      return;
+    }
+    const mock = this.config.devMode || {};
+    const map = { llm: flags.llm, tts: flags.tts, stt: flags.stt };
+    for (const [seg, on] of Object.entries(map)) {
+      if (on) {
+        this.config[seg] = this.config[seg] || {};
+        this.config[seg].provider = 'mock';
+        this.config[seg].mock = mock;
+      }
+    }
+    console.log(`[devMode] MOCK ACTIVE -> stt:${flags.stt} llm:${flags.llm} tts:${flags.tts} (no external ASR/LLM/TTS traffic)`);
+  }
+
+  /**
    * 获取服务配置（简化版，因为不再需要初始化本地服务）
    */
   getServiceConfig() {
     return {
       server: {
+        ...(this.config.server || {}),
         port: this.port,
         host: this.host,
         environment: process.env.NODE_ENV || 'development'
@@ -235,6 +265,7 @@ export class XiaozhiChannel extends EventEmitter {
   initializeWebSocketHandler() {
     // 传递所有服务到WebSocket处理器
     this.webSocketHandler = initializeWebSocketHandler({
+      config: this.config,
       deviceManager: this.deviceManager,
       sessionManager: this.sessionManager,
       llmService: this.llmService,
@@ -341,6 +372,72 @@ export class XiaozhiChannel extends EventEmitter {
         thresholds: { ...handler.defaultAudioThresholds, silenceThresholdMs: this.config.vad.silenceThresholdMs },
         persisted
       });
+    });
+
+    // 模式切换触发词（前台自由定义）：config.json → modeKeywords。
+    // 识别文本去标点后与短语全等即命中；保存即热生效（匹配处实时读 config）。
+    const MODE_KW_KEYS = ['employeeOn', 'employeeOff', 'restOn', 'restOff'];
+    this.app.get('/api/settings/mode-keywords', (_req, res) => {
+      const kw = this.config?.modeKeywords || {};
+      res.json({ ok: true, modeKeywords: Object.fromEntries(MODE_KW_KEYS.map((k) => [k, Array.isArray(kw[k]) ? kw[k] : []])) });
+    });
+
+    this.app.post('/api/settings/mode-keywords', (req, res) => {
+      const input = req.body?.modeKeywords || {};
+      const clean = {};
+      for (const k of MODE_KW_KEYS) {
+        const list = Array.isArray(input[k]) ? input[k] : [];
+        clean[k] = [...new Set(list.map((p) => String(p).trim()).filter(Boolean))];
+        if (clean[k].length > 20) return res.status(400).json({ ok: false, error: `每组最多 20 个短语（${k}）` });
+        if (clean[k].some((p) => p.length > 30)) return res.status(400).json({ ok: false, error: `单个短语最长 30 字（${k}）` });
+      }
+      // 安全闸门：休息模式必须保留至少一个退出词，否则设备将无法被语音唤醒回聊天
+      if (!clean.restOff.length) return res.status(400).json({ ok: false, error: '必须至少保留一个“退出休息”短语' });
+      this.config.modeKeywords = clean;
+      let persisted = false;
+      try {
+        const cfgPath = path.join(__dirname, 'config.json');
+        const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        raw.modeKeywords = clean;
+        fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
+        persisted = true;
+      } catch (e) {
+        channelLogger.warn(`config.json 持久化失败: ${e.message}`);
+      }
+      res.json({ ok: true, modeKeywords: clean, persisted });
+    });
+
+    // 备用服务器地址 server1（xiaozhi-server 可改）：设备主地址(server0)连不上时自动切此备用。
+    // server0 沿用原逻辑（自动探测本机IP / config.server.websocket 覆盖），本接口只维护 server1。
+    this.app.get('/api/settings/server-fallback', (_req, res) => {
+      const srv = this.config?.server || {};
+      res.json({ ok: true, server0: srv.websocket || '', server1: srv.websocket_fallback || '' });
+    });
+
+    this.app.post('/api/settings/server-fallback', (req, res) => {
+      const value = String(req.body?.server1 ?? '').trim();
+      if (value && !/^wss?:\/\//i.test(value)) {
+        return res.status(400).json({ ok: false, error: 'server1 必须是以 ws:// 或 wss:// 开头的完整地址' });
+      }
+      this.config.server = this.config.server || {};
+      this.config.server.websocket_fallback = value;
+      // OTAHandler 拿的是启动时的 server 快照，这里同步刷新以便热生效
+      if (this.otaHandler && this.otaHandler.config) {
+        this.otaHandler.config.server = this.otaHandler.config.server || {};
+        this.otaHandler.config.server.websocket_fallback = value;
+      }
+      let persisted = false;
+      try {
+        const cfgPath = path.join(__dirname, 'config.json');
+        const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        raw.server = raw.server || {};
+        raw.server.websocket_fallback = value;
+        fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
+        persisted = true;
+      } catch (e) {
+        channelLogger.warn(`config.json 持久化失败: ${e.message}`);
+      }
+      res.json({ ok: true, server1: value, persisted });
     });
 
     // 断开指定在线设备的 WebSocket 连接（管理操作，自旧 manage 页合并并真实实现）

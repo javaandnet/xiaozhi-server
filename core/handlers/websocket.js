@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
 import { logger } from '../../utils/logger.js';
 import {
   CHAT_STATES,
@@ -12,6 +14,8 @@ import DeviceModel from '../models/device.js';
 import McpService from '../services/mcp.js';
 import { getQuestManager } from '../managers/quest.js';
 import { audioConverter } from '../utils/audioConverter.js';
+import { analyzeAudioGate } from '../utils/audioGate.js';
+import { resolveMockFlags } from '../utils/devMode.js';
 import { employeeModeEnabled, askEmployee } from '../services/employeeBridge.js';
 
 /**
@@ -503,6 +507,18 @@ class WebSocketHandler {
         });
         // console.log(`设备握手成功: ${ws.clientId}, Session: ${ws.sessionId}`);
 
+        // 屏幕布局下发（A方案）：配置 displayLayout 为数字 id 时，握手后热切换
+        if (typeof this.config.displayLayout === 'number') {
+          this.sendMessage(ws, {
+            type: SERVER_MESSAGE_TYPES.LAYOUT,
+            id: this.config.displayLayout,
+            session_id: ws.sessionId
+          });
+          // console.log(`下发屏幕布局 id=${this.config.displayLayout}`);
+        }
+        // 同步当前会话模式标签到设备屏幕
+        this._sendMode(ws);
+
         // 如果设备支持MCP，发送MCP初始化消息
         if (ws.features?.mcp) {
           // console.log(`设备 ${ws.clientId} 支持MCP，发送初始化消息`);
@@ -545,6 +561,9 @@ class WebSocketHandler {
           if (ws.sessionId && this.sttService) {
             this.sttService.clearAudioBuffer(ws.sessionId);
           }
+          // devMode no longer auto-injects on listen start (that caused a
+          // listen<->speak infinite loop). With stt.provider=mock the fixed
+          // text is returned only when real voice audio passes the VAD gate.
         } else if (listenState === LISTEN_STATES.STOP) {
           // 停止监听，触发语音识别
           logger.info(`🔴 收到手动停止消息，准备触发语音识别`);
@@ -581,6 +600,9 @@ class WebSocketHandler {
           // 检测模式，处理文本
           ws.clientHaveVoice = false;
           ws.clientVoiceStop = false;
+          // 唤醒词检出即用户明确打断：同步打开麦克风闸门
+          ws.broadcastActive = false;
+          ws.broadcastIgnoreUntil = 0;
 
           if (listenText) {
             // 直接处理文本
@@ -595,6 +617,10 @@ class WebSocketHandler {
         // 设备主动打断：中止截至当前轮次的音频流（只停旧轮，不误杀随后的新轮）
         ws.abortUpTo = ws.turnSeq || 0;
         ws.clientIsSpeaking = false;
+        // 用户明确打断（唤醒词/按键）：同步开闸，否则广播类播报被 abort 后
+        // broadcastIgnoreUntil 仍会丢弃紧随其后的指令语音帧
+        ws.broadcastActive = false;
+        ws.broadcastIgnoreUntil = 0;
         // 清除会话数据
         if (ws.sessionId) {
           this.sessionManager.closeSession(ws.sessionId);
@@ -656,6 +682,9 @@ class WebSocketHandler {
       return;
     }
 
+    // 模式闸门（休息/办公/聊天）：与 _handleSttResultDirectly 共用同一实现
+    if (await this._handleModeGate(ws, text)) return;
+
     // 回声判定：无AEC设备播放时麦克风收进自己喇叭的声音，识别结果与在播内容相似；
     // 整体忽略且**不中止**当前播放，否则回声会自杀式打断每轮回复
     if (this._isEchoOfSpoken(ws, text)) {
@@ -689,6 +718,9 @@ class WebSocketHandler {
       ]))
       .catch((error) => {
         logger.warn(`轮次${myTurn}处理异常/超时 [${ws.clientId}]: ${error.message}`);
+        // 兜底：本轮被看门狗超时接管（_runChatTurn 自身已 catch 的场景不会走到这里），
+        // 仍向设备返回错误状态，避免卡“倾听中”
+        this.sendTtsNotice(ws, ws.sessionId, this.errorText('llmTimeout'));
       });
     return ws.turnChain;
   }
@@ -814,6 +846,8 @@ class WebSocketHandler {
 
       // 发送错误消息
       this.sendError(ws, `处理消息失败: ${error.message}`, sessionId);
+      // 兜底：以一次无音频TTS周期返回错误状态，避免设备永久卡在等待/倾听
+      this.sendTtsNotice(ws, sessionId, this.errorText('turnError'));
     }
   }
 
@@ -931,8 +965,6 @@ class WebSocketHandler {
    * @returns {Promise<string>} LLM回复文本
    */
   async generateLlmResponse(ws, text, questId = null) {
-    // 构造默认回复
-    const defaultResponse = `我听到了你说的"${text}"。有什么我可以帮助你的吗？`;
     const connectionId = ws.clientId;
 
     if (this.llmService && this.llmService.isConfigured()) {
@@ -961,12 +993,14 @@ class WebSocketHandler {
         console.log(`LLM回复生成成功 [quest=${questId}]: ${(response.text || "").substring(0, 50)}...`);
         return response.text;
       } catch (llmError) {
+        // LLM 后端不可用/超时：以语音兜底明确告知，而非返回看似正常的空回复
         console.error(`LLM调用失败: ${llmError.message}`);
-        return defaultResponse;
+        const isTimeout = /超时|timeout/i.test(llmError.message);
+        return this.errorText(isTimeout ? 'llmTimeout' : 'llmConnectionFail');
       }
     } else {
-      console.log(`使用默认回复: ${defaultResponse}`);
-      return defaultResponse;
+      console.warn(`LLM服务未配置，返回错误提示`);
+      return this.errorText('llmNotConfigured');
     }
   }
 
@@ -1015,6 +1049,82 @@ class WebSocketHandler {
   }
 
   /**
+   * 发送一条无音频的TTS状态流（start→sentence_start→stop）。
+   * 用于错误兜底：让设备显示提示文本并完成一次播报周期，
+   * 避免因 LLM/TTS 失败或本轮超时而永久卡在等待/“倾听中”。
+   * @param {WebSocket} ws - WebSocket连接
+   * @param {string} sessionId - 会话ID
+   * @param {string} text - 展示的错误文本
+   */
+  sendTtsNotice(ws, sessionId, text) {
+    const sid = sessionId || ws.sessionId;
+    const now = new Date().toISOString();
+    this.sendMessage(ws, { type: SERVER_MESSAGE_TYPES.TTS, session_id: sid, state: TTS_STATES.START, timestamp: now });
+    this.sendMessage(ws, { type: SERVER_MESSAGE_TYPES.TTS, session_id: sid, state: TTS_STATES.SENTENCE_START, text, timestamp: now });
+    this.sendMessage(ws, { type: SERVER_MESSAGE_TYPES.TTS, session_id: sid, state: TTS_STATES.STOP, timestamp: now });
+  }
+
+  /**
+   * 读取可配置的错误提示文案：优先 config.errorMessages[key]，缺省回落到内置默认。
+   * @param {string} key - 文案键
+   * @returns {string} 提示文本
+   */
+  errorText(key) {
+    const defaults = {
+      llmTimeout: '抱歉，AI响应超时了，请稍后再试',
+      llmConnectionFail: '抱歉，AI连接失败，请稍后再试',
+      llmNotConfigured: '抱歉，AI服务暂不可用',
+      ttsFailed: '抱歉，语音合成失败',
+      turnError: '抱歉，我这边出了点问题，请稍后再试'
+    };
+    const custom = (this.config && this.config.errorMessages) || {};
+    return custom[key] || defaults[key];
+  }
+
+  /**
+   * 将一条回复切分为逐句字幕段（方案①）。
+   * 合并过短片段、限制单段长度，避免底部文字碎得太快或请求数过多。
+   * 由 config.ttsSegment 控制：{ enabled, maxLen, minLen, maxCount }。
+   * @param {string} text - 整条回复文本
+   * @returns {string[]} 分段后的文本数组
+   */
+  _ttsSegments(text) {
+    const cfg = this.config.ttsSegment || {};
+    if (cfg.enabled === false) return [text];
+    const maxLen = cfg.maxLen || 18;
+    const minLen = cfg.minLen || 4;
+    const maxCount = cfg.maxCount || 12;
+    if (!text || text.length <= maxLen) return [text];
+
+    const parts = (this.ttsService && typeof this.ttsService._splitText === 'function')
+      ? this.ttsService._splitText(text)
+      : [text];
+
+    // 合并过短片段到上一段（不超过 maxLen）
+    const merged = [];
+    for (const p of parts) {
+      if (merged.length && p.length < minLen && (merged[merged.length - 1].length + p.length) <= maxLen) {
+        merged[merged.length - 1] += p;
+      } else {
+        merged.push(p);
+      }
+    }
+    // 对仍超长的一段按 maxLen 硬切
+    const out = [];
+    for (const m of merged) {
+      if (m.length <= maxLen) { out.push(m); continue; }
+      for (let i = 0; i < m.length; i += maxLen) out.push(m.slice(i, i + maxLen));
+    }
+    // 段数上限：超出部分合并到末段
+    if (out.length > maxCount) {
+      const head = out.slice(0, maxCount - 1);
+      head.push(out.slice(maxCount - 1).join(''));
+      return head;
+    }
+    return out.length ? out : [text];
+  }
+
+  /**
    * 发送TTS音频到客户端（完整的TTS流程）
    * 包含：发送TTS状态、合成音频、转换Opus帧、发送音频帧
    * @param {WebSocket} ws - WebSocket连接
@@ -1042,16 +1152,25 @@ class WebSocketHandler {
       //    若随后丢弃则设备永远收不到 tts-stop，卡死在说话中）
       if (this.ttsService && this.ttsService.isEnabled()) {
         try {
-          const ttsResult = await this.ttsService.synthesize(text);
-          console.log(`✅ TTS合成完成: ${ttsResult.audio?.length || ttsResult.length} bytes`);
+          // 分段（方案①）：整条回复按标点切段，逐段合成→逐段 sentence_start→逐段发帧，
+          // 设备底部文字随语音进度逐句刷新（字幕效果）。tts START/STOP 各只发一次。
+          // 关闭分段或只有一段时自然退化为单段。mock 也走分段（用预置音频按比例
+          // 切片逐段下发，以便在无网络下验证底部字幕逐句翻动）。
+          const segments = this._ttsSegments(text);
+          console.log(`🗂 TTS分段: ${segments.length} 段`);
 
-          // 合成期间用户真实打断（abort）则丢弃；此时设备尚未收到 tts-start，状态不会残留
+          // 先合成第一段，成功再发 START（避免音频没生成就把设备推进“说话中”却收不到帧→卡死）
+          const firstResult = await this.ttsService.synthesize(segments[0]);
+          // mock：一整段预置音频按各段文字长度比例切片，字幕随音频进度逐句翻动（用于测分段）
+          const mockLens = segments.map((s) => Math.max(1, (s || '').length));
+          const mockLenSum = mockLens.reduce((a, b) => a + b, 0) || 1;
+          let mockCursor = 0;
           if (isStale()) {
             console.log(`⏹ TTS合成完成但用户已打断，丢弃不发送`);
             return false;
           }
 
-          // 2. 发送TTS开始状态（音频已就绪，设备进入说话中后很快就会收到帧）
+          // 2. 发送TTS开始状态（一次）
           this.sendMessage(ws, {
             type: SERVER_MESSAGE_TYPES.TTS,
             session_id: sessionId,
@@ -1059,39 +1178,50 @@ class WebSocketHandler {
             timestamp: new Date().toISOString()
           });
 
-          // 获取音频时长信息
-          const audioDuration = ttsResult.duration || this.estimateAudioDuration(text);
-          console.log(`📊 音频时长信息: ${audioDuration}ms`);
-
-          // 记录在播语音供回声判定（无AEC设备麦克风会收进播放声，识别结果与其相似）
+          // 时长/回声判定按整条文本估算
+          const audioDuration = this.estimateAudioDuration(text);
           ws.lastSpoken = { text, until: Date.now() + audioDuration + 2000 };
-
-          // 存储时长信息供后续使用
           if (!ws.audioMetadata) ws.audioMetadata = {};
-          ws.audioMetadata[sessionId] = {
-            duration: audioDuration,
-            text: text,
-            timestamp: Date.now()
-          };
+          ws.audioMetadata[sessionId] = { duration: audioDuration, text, timestamp: Date.now() };
 
-          // 3. 发送TTS状态消息 - sentence_start
-          this.sendMessage(ws, {
-            type: SERVER_MESSAGE_TYPES.TTS,
-            session_id: sessionId,
-            state: TTS_STATES.SENTENCE_START,
-            text: text,
-            timestamp: new Date().toISOString()
-          });
+          // 3~5. 逐段：sentence_start(段) -> 该段 Opus 帧
+          for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i];
+            const result = i === 0 ? firstResult : await this.ttsService.synthesize(seg);
+            if (isStale()) {
+              console.log(`⏹ 分段播放中被打断，停止后续 ${segments.length - i} 段`);
+              break;
+            }
+            this.sendMessage(ws, {
+              type: SERVER_MESSAGE_TYPES.TTS,
+              session_id: sessionId,
+              state: TTS_STATES.SENTENCE_START,
+              text: seg,
+              timestamp: new Date().toISOString()
+            });
+            let opusFrames;
+            if (result.mockFrames !== undefined) {
+              const full = result.mockFrames || [];
+              const isLast = i === segments.length - 1;
+              const cnt = full.length === 0
+                ? 0
+                : (isLast
+                    ? Math.max(0, full.length - mockCursor)
+                    : Math.max(1, Math.round((full.length * mockLens[i]) / mockLenSum)));
+              opusFrames = full.slice(mockCursor, mockCursor + cnt);
+              mockCursor += opusFrames.length;
+              console.log(`🎵 [devMode] TTS mock 分段下发预置帧: 段${i + 1}/${segments.length} ${opusFrames.length}帧 (累计${mockCursor}/${full.length})`);
+            } else {
+              const audioBuffer = result.audio || result;
+              opusFrames = await audioConverter.mp3ToOpusFrames(audioBuffer);
+              console.log(`🎵 第${i + 1}/${segments.length}段 Opus编码完成: ${opusFrames.length} 帧`);
+            }
+            if (opusFrames.length > 0) {
+              await this.sendOpusAudioFrames(ws, opusFrames, sessionId, turn);
+            }
+          }
 
-          // 4. 将MP3音频转换为Opus帧并发送
-          const audioBuffer = ttsResult.audio || ttsResult;
-          const opusFrames = await audioConverter.mp3ToOpusFrames(audioBuffer);
-          console.log(`🎵 Opus编码完成: ${opusFrames.length} 帧`);
-
-          // 5. 发送Opus音频帧（二进制）
-          await this.sendOpusAudioFrames(ws, opusFrames, sessionId, turn);
-
-          // 6. 发送TTS停止消息（无论帧是否发完都执行，确保设备退出“说话中”）
+          // 6. 发送TTS停止消息（一次，确保设备退出“说话中”）
           this.sendMessage(ws, {
             type: SERVER_MESSAGE_TYPES.TTS,
             session_id: sessionId,
@@ -1111,6 +1241,8 @@ class WebSocketHandler {
             error: ttsError.message,
             timestamp: new Date().toISOString()
           });
+          // 兜底：补发一次无音频TTS周期，让设备显示错误文本并退出等待，避免卡“倾听中”
+          this.sendTtsNotice(ws, sessionId, text || this.errorText('ttsFailed'));
           return false;
         }
       } else {
@@ -1688,16 +1820,113 @@ class WebSocketHandler {
     return { attempted: targets.length, queued: targets.length };
   }
 
+  // ==================== 模式指令辅助 ====================
+
+  /**
+   * 语音模式指令（唤醒后说出即生效，按设备连接保持）。
+   * 触发词表完全由配置驱动（config.json → modeKeywords，前台可自由定义，每次识别实时读取热生效）：
+   *   { employeeOn:[...] , employeeOff:[...], restOn:[...], restOff:[...] }
+   * 匹配：识别文本去空格/标点后与短语全等即命中（短语自己写清“进入/退出”语义）。
+   * @returns {'employee-on'|'employee-off'|'rest-on'|'rest-off'|null}
+   */
+  _matchModeCommand(text) {
+    const norm = (s) => String(s || '').replace(/[\s\p{P}\p{S}]/gu, '');
+    const t = norm(text);
+    if (!t) return null;
+    const kw = this.config.modeKeywords || {};
+    const hit = (list) => Array.isArray(list) && list.some((p) => p && norm(p) === t);
+    if (hit(kw.employeeOn)) return 'employee-on';
+    if (hit(kw.employeeOff)) return 'employee-off';
+    if (hit(kw.restOn)) return 'rest-on';
+    if (hit(kw.restOff)) return 'rest-off';
+    return null;
+  }
+
   // ==================== 员工模式辅助 ====================
 
   /**
-   * 识别文本是否为员工模式进出指令（先过噪音/回声过滤才会到这里）
+   * 下发当前会话模式标签到设备屏幕顶部栏（layout #6）：
+   * 仅 休息 / 员工 / 聊天 三种（待命属于聊天态，不再单独显示）
    */
-  _matchEmployeeModeCommand(text) {
-    const t = String(text || '').replace(/\s/g, '');
-    if (/(进入|开启|开始|启动|切换到|切换至|切到)员工/.test(t)) return 'on';
-    if (/(退出|关闭|结束|停止)员工/.test(t)) return 'off';
-    return null;
+  _sendMode(ws) {
+    // 休息/员工优先；普通态下若开发模式总开关打开则显示"开发"，否则"聊天"。
+    // 后端仍可随时改这些标签（本方法每次实时读取）。
+    const flags = resolveMockFlags(this.config);
+    const label = ws.restMode ? '休息' : (ws.employeeMode ? '员工' : (flags.master ? '开发' : '聊天'));
+    this.sendMessage(ws, {
+      type: SERVER_MESSAGE_TYPES.MODE,
+      text: label,
+      session_id: ws.sessionId,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  /**
+   * 模式闸门（两条识别路径——handleCompleteChatMessage 与 _handleSttResultDirectly——共用）：
+   * 休息模式静默/退出、进入休息、办公(员工)模式切换与业务回合。
+   * @returns {Promise<boolean>} true=本轮已被模式层消化，调用方直接 return
+   */
+  async _handleModeGate(ws, text) {
+    const modeCmd = this._matchModeCommand(text);
+    if (ws.restMode) {
+      if (modeCmd === 'rest-off' || modeCmd === 'employee-off') {
+        ws.restMode = false;
+        logger.info(`☀️ 退出休息模式，恢复聊天 [${ws.clientId}]`);
+        this._sendMode(ws);
+        await this._speakFixed(ws, '好的，我回来啦，有事随时叫我');
+      } else {
+        logger.info(`💤 休息模式中，静默忽略输入: "${text}"${modeCmd ? ` (指令:${modeCmd})` : ''} [${ws.clientId}]`);
+      }
+      return true;
+    }
+    if (modeCmd === 'rest-on') {
+      ws.restMode = true;
+      ws.employeeMode = false; // 互斥：休息优先
+      logger.info(`💤 进入休息模式（不再应答，直到退出休息） [${ws.clientId}]`);
+      this._sendMode(ws);
+      await this._speakFixed(ws, '好的，我休息了。需要我的时候说「你好小智」，再讲「退出休息」');
+      // 关键：下发休眠指令让设备真正停止监听（息屏低功耗），消除“卡在倾听中”
+      this.sendMessage(ws, {
+        type: SERVER_MESSAGE_TYPES.SLEEP,
+        session_id: ws.sessionId,
+        timestamp: new Date().toISOString()
+      });
+      logger.info(`💤 已下发休眠指令，设备停止监听 [${ws.clientId}]`);
+      return true;
+    }
+    if (modeCmd) {
+      await this._handleEmployeeCommand(ws, text, modeCmd);
+      return true;
+    }
+    if (ws.employeeMode) {
+      await this._handleEmployeeTurn(ws, ws.sessionId, text);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 办公(员工)模式切换：由模式闸门调用（employee-on/off）
+   */
+  async _handleEmployeeCommand(ws, text, cmd) {
+    const empCfg = this.config.employee || {};
+    if (cmd === 'employee-on') {
+      if (!employeeModeEnabled(empCfg)) {
+        await this._speakFixed(ws, '办公模式未启用，请先在服务器配置');
+        return;
+      }
+      ws.employeeMode = true;
+      logger.info(`🧠 进入办公(员工)模式 [${ws.clientId}]`);
+      this._sendMode(ws);
+      await this._speakFixed(ws, '已进入办公模式，请讲');
+      return;
+    }
+    // employee-off：若本来在办公模式则确认退出；否则视为回到普通聊天
+    const was = ws.employeeMode;
+    ws.employeeMode = false;
+    logger.info(`🧠 ${was ? '退出办公(员工)模式' : '切回聊天模式'} [${ws.clientId}]`);
+    this._sendMode(ws);
+    await this._speakFixed(ws, was ? '已退出办公模式' : '好的，现在是聊天模式');
   }
 
   /**
@@ -1894,19 +2123,16 @@ class WebSocketHandler {
         // 使用设备特定阈值或默认阈值
         const thresholds = ws.audioThresholds || this.defaultAudioThresholds;
         const audioStats = this._analyzeAudioAmplitude(combinedPcm, thresholds);
-        logger.info(`📊 音频振幅分析: 最大=${audioStats.maxAmplitude}, 平均=${audioStats.avgAmplitude.toFixed(2)}, 有效=${audioStats.isValid} (阈值: max=${thresholds.minMaxAmplitude}, avg=${thresholds.minAvgAmplitude})`);
+        logger.info(`📊 音频判定[${audioStats.mode}]: 有效=${audioStats.isValid} 峰值窗RMS=${audioStats.peakWinRms.toFixed(0)} 噪声底=${audioStats.noiseFloorRms.toFixed(0)} 对比度=${audioStats.contrast.toFixed(1)} 活动窗=${audioStats.activeWindows} | max=${audioStats.maxAmplitude} avg=${audioStats.avgAmplitude.toFixed(1)} rms=${audioStats.rms.toFixed(1)}`);
+
+        // 生成 WAV 供声纹识别使用（不落盘调试）
+        wavBufferForVoiceprint = this._createWavBuffer(combinedPcm, 16000, 1, 16);
+
         if (!audioStats.isValid) {
-          // logger.warn(`⚠️ 音频数据无效（静音或振幅过低），跳过识别`);
+          logger.info(`🔇 音频振幅不足，判定为无效，跳过识别`);
           session.isProcessing = false;
           return;
         }
-
-        // 创建 WAV 文件头
-        // const debugDir = path.join(process.cwd(), 'data', 'debug-audio');
-        // wavBufferForVoiceprint = this._createWavBuffer(combinedPcm, 16000, 1, 16);
-        // const wavFile = path.join(debugDir, `audio-${timestamp}.wav`);
-        // fs.writeFileSync(wavFile, wavBufferForVoiceprint);
-        // logger.info(`💾 已保存 WAV 音频: ${wavFile} (${wavBufferForVoiceprint.length} bytes)`);
 
         // 如果是 PCM 格式，直接发送给 FunASR 识别
         logger.info(`🎤 使用 PCM 数据直接调用识别服务 (provider=${this.sttService.provider})...`);
@@ -2034,7 +2260,7 @@ class WebSocketHandler {
       logger.info(`🔇 置信度不足(${confidence.toFixed(2)}<${minConf})，忽略识别: "${text}" [${connectionId}]`);
       return;
     }
-    // 噪音/语气词过滤（总过滤在 handleCompleteChatMessage，这里提前拦省一次 Quest 创建）
+    // 识别文本是否为噪音/语气词（提前拦省一次 Quest 创建）
     if (this._isNoiseInput(text)) {
       logger.info(`🔇 忽略无效识别（噪音/语气词）: "${text}" [${connectionId}]`);
       return;
@@ -2046,25 +2272,8 @@ class WebSocketHandler {
       return;
     }
 
-    // ==================== 员工模式（aiinterview 数字员工桥）====================
-    // 「进入/退出员工」语音开关；开启后本设备识别文本全部交给映射的数字员工
-    //（跳过本地 LLM 闲聊），设备断线重连后默认关闭
-    const empCmd = this._matchEmployeeModeCommand(text);
-    if (empCmd || ws.employeeMode) {
-      const empCfg = this.config.employee || {};
-      if (empCmd) {
-        if (!employeeModeEnabled(empCfg)) {
-          await this._speakFixed(ws, '员工模式未启用，请先在服务器配置');
-          return;
-        }
-        ws.employeeMode = empCmd === 'on';
-        logger.info(`🧠 员工模式 ${ws.employeeMode ? '开启' : '关闭'} [${connectionId}]`);
-        await this._speakFixed(ws, empCmd === 'on' ? '已进入员工模式，请讲' : '已退出员工模式');
-        return;
-      }
-      await this._handleEmployeeTurn(ws, sessionId, text);
-      return;
-    }
+    // ==================== 员工/休息/聊天模式闸门（与 handleCompleteChatMessage 同源）====================
+    if (await this._handleModeGate(ws, text)) return;
 
     // ==================== Quest管理 ====================
     // 获取或创建活跃Quest
@@ -2498,36 +2707,21 @@ class WebSocketHandler {
    * @returns {Object} 振幅统计信息 { maxAmplitude, avgAmplitude, isValid }
    */
   _analyzeAudioAmplitude(pcmData, thresholds = {}) {
-    // 使用传入的阈值或默认值
-    const MIN_MAX_AMPLITUDE = thresholds.minMaxAmplitude || 500;
-    const MIN_AVG_AMPLITUDE = thresholds.minAvgAmplitude || 50;
-
-    const samples = Math.floor(pcmData.length / 2); // 16-bit = 2 bytes per sample
-
-    if (samples === 0) {
-      return { maxAmplitude: 0, avgAmplitude: 0, isValid: false };
-    }
-
-    let maxAmplitude = 0;
-    let sumAmplitude = 0;
-
-    // 采样分析（每隔一定间隔采样，提高效率）
-    const sampleStep = Math.max(1, Math.floor(samples / 1000));
-    let sampledCount = 0;
-
-    for (let i = 0; i < samples; i += sampleStep) {
-      const amplitude = Math.abs(pcmData.readInt16LE(i * 2));
-      maxAmplitude = Math.max(maxAmplitude, amplitude);
-      sumAmplitude += amplitude;
-      sampledCount++;
-    }
-
-    const avgAmplitude = sampledCount > 0 ? sumAmplitude / sampledCount : 0;
-
-    // 判断是否有效：最大振幅或平均振幅超过阈值
-    const isValid = maxAmplitude >= MIN_MAX_AMPLITUDE || avgAmplitude >= MIN_AVG_AMPLITUDE;
-
-    return { maxAmplitude, avgAmplitude, isValid };
+    // 委托给自适应噪声门：合并“设备级阈值（audioThresholds）”与“全局自适应参数（config.audio）”。
+    // 保留旧返回字段 maxAmplitude/avgAmplitude/isValid，并新增自适应诊断字段。
+    const a = this.config.audio || {};
+    const stats = analyzeAudioGate(pcmData, {
+      adaptive: a.adaptive,
+      sampleRate: a.sampleRate || this.config.stt?.sampleRate || 16000,
+      windowMs: a.windowMs,
+      absoluteSpeechFloor: a.absoluteSpeechFloor,
+      speechToNoiseMin: a.speechToNoiseMin,
+      noiseFloorWindowRatio: a.noiseFloorWindowRatio,
+      minActiveWindows: a.minActiveWindows,
+      minMaxAmplitude: thresholds.minMaxAmplitude ?? a.minMaxAmplitude,
+      minAvgAmplitude: thresholds.minAvgAmplitude ?? a.minAvgAmplitude,
+    });
+    return stats;
   }
 
   /**

@@ -41,6 +41,8 @@ export const SERVER_MESSAGE_TYPES = {
     TTS_DISABLED: 'tts_disabled',         // TTS未启用
     MCP: 'mcp',
     SLEEP: 'sleep',                       // 设备休眠指令（息屏，仅本地唤醒词可唤醒）
+    LAYOUT: 'layout',                     // 屏幕布局切换指令 {id:N}（A方案：预编译多布局，运行时热切换）
+    MODE: 'mode',                         // 屏幕模式标签指令 {text:待命|聊天|员工|休息}
     // 音频处理
     AUDIO_RECEIVED: 'audio_received',     // 音频接收确认
     WAKE_WORD_ACKNOWLEDGED: 'wake_word_acknowledged', // 唤醒词确认

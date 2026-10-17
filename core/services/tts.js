@@ -1,4 +1,5 @@
 import BaseService from './base.js';
+import { loadMockOpusFrames, MOCK_DEFAULTS } from '../utils/devMode.js';
 
 class TtsService extends BaseService {
   constructor(config = {}) {
@@ -23,6 +24,10 @@ class TtsService extends BaseService {
   async _initialize() {
     // 根据提供商初始化不同的TTS服务
     switch (this.provider) {
+      case 'mock':
+        // Development mode: no external TTS, replay pre-baked opus frames.
+        console.log('✅ TTS mock 模式初始化（开发模式，不调用外部 TTS/不跑 ffmpeg）');
+        break;
       case 'edge':
         await this._initEdgeTts();
         break;
@@ -77,6 +82,19 @@ class TtsService extends BaseService {
     try {
       let audioData;
       switch (this.provider) {
+        case 'mock': {
+          // Return pre-baked opus frames; the handler sends them directly and
+          // skips MP3->Opus (ffmpeg). null frames => handler sends a text-only notice.
+          const frames = loadMockOpusFrames((this.config.mock && this.config.mock.opusFile) || MOCK_DEFAULTS.DEFAULT_OPUS_FILE);
+          console.log(`[devMode] TTS mock frames: ${frames ? frames.length : 0} (text: ${text.substring(0, 20)})`);
+          return {
+            mockFrames: frames,
+            format: 'opus',
+            sampleRate: 16000,
+            duration: this._estimateDuration(text),
+            provider: 'mock'
+          };
+        }
         case 'edge':
           audioData = await this._synthesizeWithEdge(text, opts);
           break;

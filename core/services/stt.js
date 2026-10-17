@@ -98,6 +98,11 @@ class SttService extends BaseService {
 
     // 根据提供商初始化不同的STT服务
     switch (this.provider) {
+      case 'mock':
+        // Development mode: no ASR backend; returns fixed rotating text.
+        this.mockIndex = 0;
+        console.log(`[${this.name}] STT mock 模式初始化（开发模式，不调用任何 ASR 服务）`);
+        break;
       case 'doubao':
         await this._initDoubaoAsr();
         break;
@@ -590,6 +595,17 @@ class SttService extends BaseService {
    */
   async _recognizePcm(pcmData, sessionId) {
     switch (this.provider) {
+      case 'mock': {
+        const list = (this.config.mock && Array.isArray(this.config.mock.sttTexts) && this.config.mock.sttTexts.length)
+          ? this.config.mock.sttTexts
+          : ['这是一条开发模式测试语音'];
+        if (typeof this.mockIndex !== 'number') this.mockIndex = 0;
+        const text = list[this.mockIndex % list.length];
+        this.mockIndex += 1;
+        console.log(`[${this.name}] [devMode] STT mock 识别: "${text}"`);
+        const parsed = { content: text, language: 'zh', emotion: '😶' };
+        return { text: JSON.stringify(parsed, null, 2), parsed, rawText: text, confidence: 1.0, duration: 0, provider: 'mock', sessionId };
+      }
       case 'doubao':
         return await this._recognizeWithDoubao(pcmData, sessionId);
       case 'funasr':

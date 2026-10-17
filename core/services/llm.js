@@ -1,5 +1,6 @@
 import { logger } from '../../utils/logger.js';
 import BaseService from './base.js';
+import { mockLlmReply } from '../utils/devMode.js';
 
 /**
  * LLM服务（standalone 版：仅支持 bridge，不依赖 gala 主智能体）
@@ -28,6 +29,11 @@ class LlmService extends BaseService {
   }
 
   async _initialize() {
+    if (this.config.provider === 'mock') {
+      logger.info('LLM 服务以 mock 模式初始化（开发模式，不发任何外部请求）');
+      this.isInit = true;
+      return;
+    }
     logger.info(`初始化LLM服务 (provider=${this.config.provider})`);
     if (this.config.provider === 'openai') {
       // 直连模式：探活 OpenAI 兼容端点，失败不阻断初始化
@@ -74,6 +80,13 @@ class LlmService extends BaseService {
    */
   async chat(questId, message) {
     try {
+      if (this.config.provider === 'mock') {
+        const reply = mockLlmReply(this.config.mock);
+        this.addToHistory(questId, 'user', message);
+        this.addToHistory(questId, 'assistant', reply);
+        logger.info(`[devMode] LLM mock reply: ${reply.substring(0, 30)}`);
+        return { text: reply, rawText: reply, sessionId: questId, provider: 'mock', model: 'mock' };
+      }
       if (this.config.provider === 'openai') {
         return await this.chatViaOpenai(questId, message);
       }
