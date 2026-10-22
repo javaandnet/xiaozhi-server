@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { connect } from 'net';
+import { DatabaseSync } from 'node:sqlite';
 import { run, shq, fetchJson } from './util.js';
 
 let boardCache = { ts: 0, data: null };
@@ -96,14 +97,17 @@ export async function listBoards(cfg, { refresh = false } = {}) {
 
 /** 读设备注册表 xz_devices（最近连接，用于自动识别板型） */
 export async function listDevices(cfg, limit = 10) {
-  if (!fs.existsSync(cfg.deviceDb)) return { error: '未找到设备库 gala.db', items: [] };
-  const sql = `SELECT device_id, model, type, firmware_version, online, datetime(last_seen/1000,'unixepoch','localtime') AS last_seen FROM xz_devices ORDER BY last_seen DESC LIMIT ${Number(limit) | 0};`;
-  const r = await run(`sqlite3 -json ${shq(cfg.deviceDb)} ${shq(sql)} 2>/dev/null`, { timeoutMs: 8000 });
-  if (r.code !== 0 || !r.out.trim()) return { items: [] };
+  if (!fs.existsSync(cfg.deviceDb)) return { error: `device db not found: ${cfg.deviceDb}`, items: [] };
   try {
-    return { items: JSON.parse(r.out) };
-  } catch {
-    return { items: [] };
+    const db = new DatabaseSync(cfg.deviceDb, { readOnly: true });
+    const rows = db.prepare(
+      "SELECT device_id, model, type, firmware_version, online, datetime(last_seen/1000,'unixepoch','localtime') AS last_seen FROM xz_devices ORDER BY last_seen DESC LIMIT ?"
+    ).all(Number(limit) | 0);
+    db.close();
+    return { items: rows };
+  } catch (e) {
+    console.warn('[Studio] listDevices failed:', e.message);
+    return { error: e.message, items: [] };
   }
 }
 

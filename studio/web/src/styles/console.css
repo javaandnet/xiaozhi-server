@@ -1,0 +1,155 @@
+/* Console-wide layout helpers, all built on Element Plus CSS variables so the
+   dark theme follows the theme instead of hard-coded colors. */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--el-bg-color);
+}
+
+#app {
+  height: 100%;
+}
+
+.lay {
+  height: 100%;
+}
+
+.aside {
+  border-right: 1px solid var(--el-border-color);
+  display: flex;
+  flex-direction: column;
+}
+
+.logo {
+  padding: 16px 18px;
+  font-weight: 700;
+  font-size: 15px;
+  border-bottom: 1px solid var(--el-border-color);
+}
+
+.logo small {
+  display: block;
+  color: var(--el-text-color-secondary);
+  font-weight: 400;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.el-menu {
+  border-right: none !important;
+}
+
+.hd {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--el-border-color);
+}
+
+.hd h1 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.hd .sp {
+  flex: 1;
+}
+
+.main {
+  padding: 18px;
+  overflow: auto;
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.card {
+  margin-bottom: 16px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.statv {
+  font-size: 26px;
+  font-weight: 700;
+}
+
+.stats {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+/* Operation buttons keep a uniform width so rows stay visually aligned. */
+.op-btn {
+  min-width: 62px;
+}
+
+pre.dump {
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  padding: 12px;
+  max-height: 420px;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+pre.result {
+  background: var(--el-color-success-light-9);
+  border-radius: 6px;
+  padding: 10px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+/* Build / flash consoles: one line per child div, colored by severity class. */
+pre.log {
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  padding: 12px;
+  height: 300px;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 10px 0 0;
+}
+
+pre.log .ok {
+  color: var(--el-color-success);
+}
+
+pre.log .bad {
+  color: var(--el-color-danger);
+}
+
+pre.log .warn {
+  color: var(--el-color-warning);
+}
+
+pre.log .blue {
+  color: var(--el-color-primary);
+}

@@ -205,6 +205,59 @@ class VoiceprintService extends BaseService {
     }
   }
 
+  /**
+   * 声纹注册接口（预留）：向外部声纹服务 POST /voiceprint/register 登记一段音频为某说话人。
+   * 声纹服务未配置时直接返回失败，不抛异常。
+   * @param {string} speakerId - 说话人ID（与 config.voiceprint.speakers 首段一致）
+   * @param {Buffer|ArrayBuffer} audioData - 注册音频（WAV）
+   */
+  async registerSpeaker(speakerId, audioData) {
+    if (!this.enabled || !this.apiKey) {
+      logger.warn('声纹服务未启用，无法注册声纹');
+      return { ok: false, error: 'voiceprint disabled' };
+    }
+    try {
+      const baseUrl = this.apiUrl.replace(/\/voiceprint\/identify$/, '');
+      const formData = new FormData();
+      formData.append('speaker_id', speakerId);
+      formData.append('file', new Blob([audioData], { type: 'audio/wav' }), 'register.wav');
+      const response = await fetch(`${baseUrl}/voiceprint/register`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${this.apiKey}` },
+        body: formData,
+        signal: AbortSignal.timeout(15000)
+      });
+      const ok = response.ok;
+      logger.info(`声纹注册 ${speakerId}: HTTP ${response.status}`);
+      return { ok, error: ok ? null : `HTTP ${response.status}` };
+    } catch (e) {
+      logger.error(`声纹注册失败: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  }
+
+  /** 声纹删除接口（预留）：DELETE /voiceprint/delete?speaker_id= */
+  async deleteSpeaker(speakerId) {
+    if (!this.enabled || !this.apiKey) {
+      logger.warn('声纹服务未启用，无法删除声纹');
+      return { ok: false, error: 'voiceprint disabled' };
+    }
+    try {
+      const baseUrl = this.apiUrl.replace(/\/voiceprint\/identify$/, '');
+      const response = await fetch(`${baseUrl}/voiceprint/delete?speaker_id=${encodeURIComponent(speakerId)}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${this.apiKey}` },
+        signal: AbortSignal.timeout(10000)
+      });
+      const ok = response.ok;
+      logger.info(`声纹删除 ${speakerId}: HTTP ${response.status}`);
+      return { ok, error: ok ? null : `HTTP ${response.status}` };
+    } catch (e) {
+      logger.error(`声纹删除失败: ${e.message}`);
+      return { ok: false, error: e.message };
+    }
+  }
+
   async _healthCheck() {
     if (!this.enabled) {
       return { message: '声纹服务未启用' };

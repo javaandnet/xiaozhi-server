@@ -86,6 +86,8 @@ class DeviceManager {
   }
 
   // 移除设备
+  // 归属校验在上层做（handleDisconnect 用 activeConnections 比对关闭的是否为当前活跃连接），
+  // 这里只负责按 clientId 删除。
   removeDevice(clientId) {
     const device = this.devices.get(clientId);
     if (device) {

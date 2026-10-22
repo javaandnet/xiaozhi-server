@@ -699,9 +699,13 @@ class UIController {
             employeeOff: 'modeKwEmployeeOff',
             restOn: 'modeKwRestOn',
             restOff: 'modeKwRestOff',
+            practiceOn: 'modeKwPracticeOn',
+            practiceOff: 'modeKwPracticeOff',
+            practiceEndManual: 'modeKwPracticeEndManual',
+            practiceEndAuto: 'modeKwPracticeEndAuto',
         };
         try {
-            const res = await fetch('/api/settings/mode-keywords');
+            const res = await fetch((location.pathname.startsWith('/xiaozhi') ? '/xiaozhi' : '') + '/api/settings/mode-keywords');
             const data = await res.json();
             if (!data.ok) throw new Error(data.error || '加载失败');
             for (const [key, id] of Object.entries(fields)) {
@@ -724,11 +728,15 @@ class UIController {
                 employeeOff: toArray('modeKwEmployeeOff'),
                 restOn: toArray('modeKwRestOn'),
                 restOff: toArray('modeKwRestOff'),
+                practiceOn: toArray('modeKwPracticeOn'),
+                practiceOff: toArray('modeKwPracticeOff'),
+                practiceEndManual: toArray('modeKwPracticeEndManual'),
+                practiceEndAuto: toArray('modeKwPracticeEndAuto'),
             }
         };
         try {
             if (status) { status.textContent = '保存中…'; status.style.color = ''; }
-            const res = await fetch('/api/settings/mode-keywords', {
+            const res = await fetch((location.pathname.startsWith('/xiaozhi') ? '/xiaozhi' : '') + '/api/settings/mode-keywords', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),

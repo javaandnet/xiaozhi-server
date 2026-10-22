@@ -236,6 +236,22 @@
                             <label for="modeKwRestOff">退出休息（恢复聊天）：</label>
                             <textarea id="modeKwRestOff" rows="3" placeholder="每行一个短语，如：退出休息模式"></textarea>
                         </div>
+                        <div class="input-group">
+                            <label for="modeKwPracticeOn">进入口语练习模式（长段讲述不抢答）：</label>
+                            <textarea id="modeKwPracticeOn" rows="3" placeholder="每行一个短语，支持多语言，如：进入口语模式 / practice speaking"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwPracticeOff">退出口语练习模式：</label>
+                            <textarea id="modeKwPracticeOff" rows="3" placeholder="每行一个短语，如：退出口语模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwPracticeEndManual">口语模式切手动结束（讲完按设备按钮收卷）：</label>
+                            <textarea id="modeKwPracticeEndManual" rows="3" placeholder="每行一个短语，如：手动结束 / manual end"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwPracticeEndAuto">口语模式切自动结束（LLM 判断说完，每段多一次小调用）：</label>
+                            <textarea id="modeKwPracticeEndAuto" rows="3" placeholder="每行一个短语，如：自动结束 / auto end"></textarea>
+                        </div>
                         <div class="input-group" style="display:flex;align-items:center;gap:12px;">
                             <button class="tab-btn" id="modeKeywordsSaveBtn" style="min-width:90px;">保存</button>
                             <span id="modeKeywordsStatus" style="font-size:13px;"></span>

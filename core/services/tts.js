@@ -6,12 +6,21 @@ class TtsService extends BaseService {
     super('TTS', config);
     this.provider = config.provider || 'edge';
     this.voice = config.voice || 'zh-CN-XiaoxiaoNeural';
+    // 多语言音色：假名→日语，纯拉丁→英语，汉字→中文；无法判定按
+    // defaultLanguage（config.json → language.default）托底
+    this.defaultLanguage = config.defaultLanguage || 'zh';
+    this.voiceZh = this.voice;
+    this.voiceJa = String(config.voicejp || config.voiceJa || 'ja-JP-NanamiNeural').trim();
+    this.voiceEn = String(config.voiceEn || 'en-US-JennyNeural').trim();
     this.rate = config.rate || 1.0;
     this.volume = config.volume || 1.0;
 
     // 标点符号配置（用于文本分段）
     this.punctuations = ['。', '？', '?', '！', '!', '；', ';', '：', '\n'];
     this.firstSentencePunctuations = ['，', '~', '、', ',', '。', '？', '?', '！', '!', '；', ';', '：'];
+    // 硬断句标点（在中日英混排统一口径下使用）：半角 . 仅在词后紧跟空白时另判；
+    // 半角 , ; : 只作软停顿（不在此集合），避免拆坏 URL/缩写且不符合英文断句习惯
+    this.breakingPunctuations = new Set(['。', '．', '？', '！', '；', '：', '?', '!', '\n']);
     
     // 音频文件保存配置
     this.outputDir = config.outputDir || './data/tts-output';
@@ -71,6 +80,9 @@ class TtsService extends BaseService {
 
     // 清理文本中的Markdown格式
     text = this._cleanMarkdown(text);
+    // 移除表情符号：emoji 只是设备端显示层装饰，交给 TTS 引擎会被念成
+    // 「微笑的脸」之类的文字描述，语音里没必要，故仅对合成文本剥离
+    text = this._stripEmoji(text);
 
     const opts = {
       voice: options.voice || this.voice,
@@ -255,7 +267,30 @@ class TtsService extends BaseService {
   }
 
   /**
-   * 根据标点符号分割文本
+   * 将文本拆成不可再分的最小 token（分段/切行的唯一口径）：
+   * - URL/邮箱/版本号/文件名（https://x.com, v1.2.3, a.py）整体成 token，禁止拆坏；
+   * - 拉丁词/数字（含 it's、O'clock、state-of-the-art 这类带撇号连字符的词）整体成 token，禁止切开；
+   * - 其余字符（CJK 汉字/假名/中日标点，一字一义可任意处断，与中文习惯一致）单独成 token；
+   * - 空白连续段单独成 token，作为英文词天然的可断边界。
+   * @param {string} text - 原始文本
+   * @returns {string[]} token 数组
+   */
+  _tokenize(text) {
+    // 注：\p{Script=Latin} 不含数字，拉丁词/数字统一用 [\p{sc=Latin}\p{Nd}]（含全角数字）
+    const re = /https?:\/\/\S+|\S+@\S+\.(?:[a-z]{2,})|(?:[\p{sc=Latin}\p{Nd}]+(?:[._-][\p{sc=Latin}\p{Nd}]+)*[._-]\d[._\d]*|\d+(?:[._-]\d+)+)|(?:[\p{sc=Latin}\p{Nd}]+(?:['’-][^\s\p{sc=Latin}\p{Nd}]*|['’-]?[\p{sc=Latin}\p{Nd}]+)*)|\s+|[\s\S]/gu;
+    const tokens = [];
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      tokens.push(match[0]);
+    }
+    return tokens;
+  }
+
+  /**
+   * 根据标点符号分割文本（多语言安全版）。
+   * 断句点用 breakingPunctuations（半角 . 仅在词后紧跟空白/行尾时作句末，避免拆坏 URL/小数）；
+   * 拉丁词按整词推进，句末后紧跟的 closing 引号/括号并入本段再断，
+   * 保证英文/日文句子不会在单词中间被强行劈开（中文逐字成段的逻辑不受影响）。
    * @param {string} text - 原始文本
    * @returns {Array} - 文本片段数组
    */
@@ -263,17 +298,53 @@ class TtsService extends BaseService {
     if (!text) return [];
 
     const segments = [];
+    // 只把无歧义的 closing 符号并入句末（直引号 " 无法区分开闭，不并入）
+    const closing = new Set(['”', '」', '』', '）', '）']);
+    const opening = new Set(['“', '「', '『', '（', '(']);
+    const tokens = this._tokenize(text);
+    const atb = (i) => i < tokens.length && !/^\s+$/.test(tokens[i]) ? tokens[i][tokens[i].length - 1] : null;
     let currentSegment = '';
 
-    for (const char of text) {
-      currentSegment += char;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      const lastChar = token[token.length - 1];
 
-      if (this.punctuations.includes(char)) {
-        if (currentSegment.trim()) {
-          segments.push(currentSegment.trim());
-        }
+      // 换行始终分段（与旧行为一致）
+      if (token.includes('\n')) {
+        if (currentSegment.trim()) segments.push(currentSegment.trim());
         currentSegment = '';
+        continue;
       }
+
+      currentSegment += token;
+
+      // 半角 . 仅在后面是空白/行尾时作句末（与英文排版一致，Hello.World / 1.5 / URL 不拆）；
+      // 半角 , ; : 不在此断句（由打包层的软停顿处理），全角标点（含中日逗号、、）直接断句
+      const nextIsSpace = i + 1 >= tokens.length || /^\s/.test(tokens[i + 1]);
+      const isBreak = this.breakingPunctuations.has(lastChar)
+        || (lastChar === '.' && nextIsSpace);
+      if (!isBreak) continue;
+
+      // 句末后若紧跟 closing 引号/括号，先并入本段再断（如「終わった。」、“好的。”）；
+      // 如「xxx。」这类句末前就有未配对 opening 的（如 “Hello.”）不并入，避免拆坏括号对
+      let j = i + 1;
+      if (atb(j) && closing.has(atb(j))) {
+        let back = i;
+        let sawOpening = false;
+        while (back >= 0 && (atb(back) === null || opening.has(atb(back)))) {
+          if (atb(back) !== null) sawOpening = true;
+          back--;
+        }
+        if (!sawOpening) {
+          while (j < tokens.length && /^\s+$/.test(tokens[j])) j++;
+          if (j < tokens.length && closing.has(tokens[j][tokens[j].length - 1])) {
+            currentSegment += tokens[j];
+            i = j;
+          }
+        }
+      }
+      if (currentSegment.trim()) segments.push(currentSegment.trim());
+      currentSegment = '';
     }
 
     // 处理最后一段
@@ -282,6 +353,50 @@ class TtsService extends BaseService {
     }
 
     return segments;
+  }
+
+  /**
+   * 移除表情符号（仅语音合成前调用，不影响展示文本）
+   * 常规：正文里夹带的 emoji 属显示层装饰，直接剥离不念；
+   * 兜底：若整段只剩 emoji（无其它可读文字），则念出其语义（如 😊=>“微笑”），
+   *       避免纯表情回复被 TTS 吞掉导致设备无声。
+   * @param {string} text - 原始文本
+   * @returns {string} - 处理后用于合成的文本
+   */
+  _stripEmoji(text) {
+    if (!text) return '';
+    // 先抽出图像字符序列：变体选择符/肤色修饰/ZWJ+图象字符合为一个整体，相邻独立 emoji 分开
+    const pictographs = text.match(/\p{Extended_Pictographic}(?:\uFE0F|[\u{1F3FB}-\u{1F3FF}]|\u200D\p{Extended_Pictographic})*/gu) || [];
+    const stripped = text
+      .replace(/\p{Emoji_Presentation}/gu, '')
+      .replace(/\p{Extended_Pictographic}(?:\uFE0F|\uD83C[\uDFFB-\uDFFF])?/gu, '')
+      .replace(/#[\uFE0F]?\u20E3|[0-9*\uFE0F]\u20E3/g, '')
+      .replace(/[\u200D\uFE0F]/g, '')
+      .replace(/ +([，。！？、；：,!?;:])/g, '$1')
+      .trim();
+    // 剥离后仍有文字：正常丢弃 emoji
+    if (stripped) return stripped;
+    // 整段就是纯 emoji：按语义表逐个念出（未命中则仍为空，不瞎编）
+    const MEANINGS = {
+      '🙂': '微笑', '😊': '微笑', '😀': '笑', '😃': '笑', '😄': '笑',
+      '😂': '笑场', '🤣': '大笑', '😉': '眼意', '😍': '喜蛋', '🥰': '喜爱',
+      '😘': '亲吻', '😜': '吐舌', '🤪': '鬼脸', '😎': '得意', '🤗': '拥抱',
+      '🙃': '反笑', '😌': '安然', '😴': '困了', '🥱': '困了',
+      '😡': '生气了', '😠': '生气', '🤬': '生气了', '😱': '吓人', '😨': '害怕',
+      '😰': '紧张', '😥': '难过', '😢': '哭了', '😭': '大哭', '😤': '哼',
+      '😳': '害羞', '🥺': '央求', '😖': '纠结', '😔': '有点难过', '😞': '失望',
+      '😩': '累了', '😪': '累了', '🤤': '馋了', '😷': '不舒服', '🤒': '生病了',
+      '🤕': '受伤了', '🙄': '无语', '😑': '无语', '😐': '平静', '🤔': '想想',
+      '😬': '尴尬', '🙁': '不高兴', '😕': '疑惑', '🤐': '沉默', '😯': '异', '😲': '惊讶',
+      '👍': '点赞', '👎': '点不认同', '👏': '鼓掌', '🙏': '谢谢', '💪': '加油',
+      '👋': '挥手', '🤝': '合作', '✌': '胜利', '👌': '好的', '🙌': '万岁',
+      '❤': '爱心', '💔': '心碎', '🎉': '庆祝', '✨': '闪光', '🔥': '火热',
+      '⭐': '星星', '🌟': '闪亮', '☀': '晴天', '🌙': '晚上', '🌸': '花开'
+    };
+    const spoken = pictographs
+      .map((g) => MEANINGS[g] || MEANINGS[g.replace(/\uFE0F/g, '')] || '')
+      .filter(Boolean);
+    return [...new Set(spoken)].join('，');
   }
 
   /**
@@ -330,6 +445,17 @@ class TtsService extends BaseService {
 
   updateVoice(voice) {
     this.voice = voice;
+    this.voiceZh = voice;
+  }
+
+  /** 按文本内容选音色；无实质语种特征时用 defaultLanguage 托底 */
+  pickVoice(text, lang = null) {
+    const t = String(text || '');
+    if (/[\u3040-\u30ff]/.test(t)) return this.voiceJa;   // 假名 => 日语
+    if (/[\u4e00-\u9fff]/.test(t)) return this.voiceZh;   // 汉字 => 中文
+    if (/[A-Za-z]/.test(t)) return this.voiceEn;          // 拉丁字母 => 英语
+    const map = { zh: this.voiceZh, ja: this.voiceJa, en: this.voiceEn };
+    return map[lang || this.defaultLanguage] || this.voiceZh;
   }
 
   updateProvider(provider) {

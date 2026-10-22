@@ -1,0 +1,14 @@
+/* Login entry: center the Element Plus card on the themed background. */
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#login-app {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=MasterPi xiaozhi device-MCP client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKDIR@
+ExecStart=@PYTHON@ -u @WORKDIR@/client.py --config @WORKDIR@/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -6,14 +6,19 @@
   "main": "index.js",
   "scripts": {
     "start": "node run-server.js",
-    "dev": "node --watch run-server.js"
+    "dev": "node --watch run-server.js",
+    "web:install": "pnpm --dir studio/web install",
+    "web:build": "pnpm --dir studio/web build",
+    "web:dev": "pnpm --dir studio/web dev"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "better-sqlite3": "^12.6.2",
     "dotenv": "^16.6.1",
     "element-plus": "^2.14.6",
+    "esptool-js": "^0.7.0",
     "express": "^4.22.1",
+    "hap-controller": "^0.10.2",
     "node-edge-tts": "^1.2.10",
     "node-lame": "^2.0.2",
     "opusscript": "^0.1.1",

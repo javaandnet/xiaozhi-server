@@ -1,5 +1,8 @@
 import BaseModel from './base.js';
 
+// WebSocket readyState.OPEN。仅用于判活，避免为此引入 ws 依赖
+const WS_READY_STATE_OPEN = 1;
+
 class DeviceModel extends BaseModel {
   constructor(data = {}) {
     super(data);
@@ -42,6 +45,13 @@ class DeviceModel extends BaseModel {
   }
 
   isOnline() {
+    // 在线以真实 WebSocket 连接为准：连接在就在线。休息态设备保持连接但不上传有效语音，
+    // lastActivity 因此长期不刷新；若沿用活动窗口判定，设备连上 2 分钟后必被误判离线
+    // （后台设备一览显示"未在线"即此因）。
+    if (this.connection) {
+      return this.connection.readyState === WS_READY_STATE_OPEN;
+    }
+    // 无连接引用（仅由注册信息重建的设备）退回状态位 + 活动窗口兜底
     return this.status === 'online' &&
       (new Date() - new Date(this.lastActivity)) < 120000; // 2分钟内
   }

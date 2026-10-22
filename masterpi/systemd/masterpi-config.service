@@ -1,0 +1,17 @@
+[Unit]
+Description=MasterPi connection settings web server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@WORKDIR@
+Environment=MASTERPI_CLIENT_SERVICE=masterpi-client
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=@PYTHON@ -u @WORKDIR@/config_server.py --config @WORKDIR@/config.json
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

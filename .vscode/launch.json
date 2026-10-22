@@ -1,0 +1,45 @@
+{
+  // 在 Qoder 左侧「运行和调试」面板（⇧D）或按 F5 选择配置启动。
+  // 启动的进程会显示在调试面板/集成终端里，便于看清当前跑着哪些程序。
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "启动 8003 服务 (run-server.js)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/run-server.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+    },
+    {
+      "name": "开发模式 (node --watch run-server.js)",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--watch"],
+      "program": "${workspaceFolder}/run-server.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "restart": true,
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+    },
+    {
+      "name": "前端开发服务器 (studio/web vite :5174)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/studio/web",
+      "runtimeArgs": ["run", "dev"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "全栈：8003 服务 + 前端 dev",
+      "configurations": [
+        "启动 8003 服务 (run-server.js)",
+        "前端开发服务器 (studio/web vite :5174)"
+      ]
+    }
+  ]
+}

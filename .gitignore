@@ -8,3 +8,8 @@ config.json.bak*
 .env
 .DS_Store
 config.json.reconstructed-good
+homecenter/
+__pycache__/
+package-lock.json
+masterpi/doc/memo.md
+studio/public/app/

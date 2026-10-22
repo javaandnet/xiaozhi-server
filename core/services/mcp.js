@@ -1,4 +1,6 @@
+import os from 'os';
 import BaseService from './base.js';
+import { getConfig } from '../../config/loader.js';
 
 /**
  * MCP工具定义
@@ -36,7 +38,8 @@ const ToolType = {
   SERVER_MCP: 'server_mcp',
   DEVICE_IOT: 'device_iot',
   DEVICE_MCP: 'device_mcp',
-  MCP_ENDPOINT: 'mcp_endpoint'
+  MCP_ENDPOINT: 'mcp_endpoint',
+  HOMEKIT: 'homekit'
 };
 
 /**
@@ -183,11 +186,67 @@ class McpService extends BaseService {
   }
 
   /**
+   * 接入 HomeKit 控制器服务（方案A）：注册执行器并把已发现的灯具注入工具池。
+   * 由启动流程在 HomeKitService.start() 之后调用；灯具变化后可再次调用刷新。
+   */
+  setHomeKitService(homekitService) {
+    if (!homekitService) return;
+    this.registerExecutor(ToolType.HOMEKIT, new HomeKitExecutor(homekitService));
+    this.refreshTools();
+  }
+
+  /**
    * 使缓存失效
    */
   invalidateCache() {
     this.toolCache = null;
     this.functionDescriptionsCache = null;
+  }
+
+  /**
+   * 机器人硬件（device-MCP 工具提供方）在线状态：供管理平台展示“硬件是否在线 / 可用工具数”。
+   * ready 且工具就绪的 provider 代表中能真正接指令的身体；totalTools 为当前可注入 function 池大小。
+   * 仅 device_type 为 robot/peripheral/mcp_only 的才是“机器人身体”；小智语音设备自带的 device-MCP 工具
+   * 不属身体（robot=false），供管理平台按身体列表过滤展示。
+   */
+  getDeviceProviderStatus() {
+    const providers = [];
+    for (const [clientId, mc] of this.deviceClients) {
+      const deviceType = (mc.connection && mc.connection.deviceType) || null;
+      const isRobot = ['robot', 'peripheral', 'mcp_only'].includes(String(deviceType || '').toLowerCase());
+      providers.push({
+        clientId,
+        deviceId: (mc.connection && mc.connection.deviceId) || null,
+        mac: (mc.connection && mc.connection.deviceMac) || null,
+        name: (mc.serverInfo && mc.serverInfo.name)
+          || (mc.connection && mc.connection.deviceName)
+          || (mc.connection && mc.connection.deviceId)
+          || '未知设备',
+        version: (mc.serverInfo && mc.serverInfo.version) || '',
+        ready: mc.isReady(),
+        toolCount: mc.tools.size,
+        deviceType,
+        robot: isRobot
+      });
+    }
+    // 按稳定标识归一（mac 优先，其次 deviceId，再 clientId），同标识只保留最新一条：
+    // 断线重连会在 deviceClients 留下僵尸旧条目，Map 插入顺序即时间序，后写覆盖=取最新活连接。
+    const byKey = new Map();
+    for (const p of providers) {
+      const key = (p.mac && String(p.mac).toLowerCase())
+        || (p.deviceId && String(p.deviceId).toLowerCase())
+        || String(p.clientId).toLowerCase();
+      byKey.set(key, p);
+    }
+    const deduped = Array.from(byKey.values());
+    const bodies = deduped.filter((p) => p.robot);
+    return {
+      providers: deduped,
+      readyProviders: deduped.filter((p) => p.ready).length,
+      totalTools: this.getFunctionDescriptions().length,
+      robotReadyProviders: bodies.filter((p) => p.ready).length,
+      robotTotalTools: bodies.reduce((n, p) => n + (p.ready ? p.toolCount : 0), 0)
+    };
   }
 
   /**
@@ -215,6 +274,33 @@ class McpService extends BaseService {
 
     this.toolCache = Object.fromEntries(allTools);
     return this.toolCache;
+  }
+
+  getFunctionDescriptionsForProvider(providerKey) {
+    const mc = this._findDeviceClient(providerKey);
+    return (mc && mc.isReady()) ? mc.getAvailableTools() : [];
+  }
+
+  /** 按工具类型取函数描述（OpenAI 格式），如 homekit 家居工具独立于机器人身体注入 */
+  getFunctionDescriptionsForType(toolType) {
+    const tools = this.getAllTools();
+    return Object.values(tools)
+      .filter((t) => t && t.toolType === toolType)
+      .map((t) => t.description);
+  }
+
+  /** 按稳定标识（hello device_id / mac / clientId，大小写不敏感）定位某个工具提供方连接 */
+  _findDeviceClient(key) {
+    if (!key) return null;
+    const k = String(key).toLowerCase();
+    let found = null;
+    for (const [clientId, mc] of this.deviceClients) {
+      const devId = String((mc.connection && mc.connection.deviceId) || '').toLowerCase();
+      const mac = String((mc.connection && mc.connection.deviceMac) || '').toLowerCase();
+      // 取最新匹配：同一设备的断线重连会留下旧条目，僵尸先注册，必须总拿最后一条活连接
+      if (String(clientId).toLowerCase() === k || (devId && devId === k) || (mac && mac === k)) found = mc;
+    }
+    return found;
   }
 
   /**
@@ -338,6 +424,8 @@ class McpService extends BaseService {
     }
 
     const mcpClient = this.deviceClients.get(clientId);
+    // 保存设备当前活连接，供跨设备工具路由（见 callDeviceMcpTool）使用
+    mcpClient.connection = connection;
 
     // 处理结果
     if ('result' in payload) {
@@ -355,6 +443,7 @@ class McpService extends BaseService {
         console.log('✅ 收到MCP初始化响应');
         const serverInfo = result?.serverInfo;
         if (serverInfo && typeof serverInfo === 'object') {
+          mcpClient.serverInfo = serverInfo;
           console.log(`🖥️ 客户端MCP服务器信息: name=${serverInfo.name}, version=${serverInfo.version}`);
         }
 
@@ -462,6 +551,20 @@ class McpService extends BaseService {
    * 发送MCP初始化消息
    */
   sendMcpInitializeMessage(connection) {
+    // Vision capability: firmware McpServer::ParseCapabilities reads
+    // capabilities.vision.url/token and feeds Camera::SetExplainUrl, which is
+    // the only way self.camera.take_photo can upload the captured JPEG.
+    // URL must be LAN-reachable for the device (same addressing as the OTA
+    // websocket url); endpoint lives at core/routes/visionRoutes.js.
+    const cfg = getConfig() || {};
+    const port = cfg.port || 8003;
+    let localIp = '127.0.0.1';
+    const interfaces = os.networkInterfaces();
+    outer: for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name] || []) {
+        if (iface.family === 'IPv4' && !iface.internal) { localIp = iface.address; break outer; }
+      }
+    }
     const payload = {
       jsonrpc: '2.0',
       id: 1,
@@ -470,7 +573,11 @@ class McpService extends BaseService {
         protocolVersion: '2024-11-05',
         capabilities: {
           roots: { listChanged: true },
-          sampling: {}
+          sampling: {},
+          vision: {
+            url: `http://${localIp}:${port}/xiaozhi/vision/explain`,
+            ...(cfg.sharedToken ? { token: cfg.sharedToken } : {})
+          }
         },
         clientInfo: {
           name: 'XiaozhiClient',
@@ -516,9 +623,39 @@ class McpService extends BaseService {
   /**
    * 调用设备端MCP工具
    */
-  async callDeviceMcpTool(connection, toolName, args = {}, timeout = 30) {
-    const clientId = connection.clientId;
-    const mcpClient = this.deviceClients.get(clientId);
+  async callDeviceMcpTool(connection, toolName, args = {}, timeout = 30, boundProviderKey = null) {
+    // 路由到“真正拥有该工具的设备”：优先当前会话设备，否则在所有在线设备中按 hasTool 查找。
+    // 这样跨设备（如 ESP32 会话调用 MasterPi 的 robot.* 工具）才能正确下发。
+    let mcpClient;
+    let targetConnection = connection;
+    if (boundProviderKey) {
+      // 一一对应绑定：只路由到绑定的身体，绝不回退全局，避免多台机器人时指挥错乱
+      mcpClient = this._findDeviceClient(boundProviderKey);
+      if (!mcpClient || !mcpClient.isReady()) {
+        throw new Error(`绑定的机器人硬件离线或未就绪: ${boundProviderKey}`);
+      }
+      if (!mcpClient.hasTool(toolName)) {
+        throw new Error(`绑定的机器人硬件(${boundProviderKey})不支持工具 ${toolName}`);
+      }
+      targetConnection = mcpClient.connection || connection;
+      console.log(`🔒 按绑定路由工具 ${toolName} → ${boundProviderKey}`);
+    } else {
+      mcpClient = this.deviceClients.get(connection.clientId);
+      if (!mcpClient || !mcpClient.isReady() || !mcpClient.hasTool(toolName)) {
+        let found = null;
+        for (const [, mc] of this.deviceClients) {
+          if (mc.isReady() && mc.hasTool(toolName)) {
+            found = mc;
+            break;
+          }
+        }
+        if (found) {
+          mcpClient = found;
+          targetConnection = found.connection || connection;
+          console.log(`🔀 跨设备路由工具 ${toolName} 到归属设备连接`);
+        }
+      }
+    }
 
     if (!mcpClient) {
       throw new Error('设备端MCP客户端未初始化');
@@ -561,7 +698,7 @@ class McpService extends BaseService {
     };
 
     console.log(`📤 发送客户端MCP工具调用请求: ${actualName}，参数:`, toolArgs);
-    this.sendMcpMessage(connection, payload);
+    this.sendMcpMessage(targetConnection, payload);
 
     try {
       // 等待响应或超时
@@ -593,15 +730,35 @@ class McpService extends BaseService {
 
     } catch (error) {
       mcpClient.cleanupCallResult(toolCallId);
+      // 超时未响应：连接大概率是僵尸（对端进程已死但未触发 close），清理该条目，
+      // 避免后续路由反复命中死连接；设备真还活着会自行重连重新注册
+      if (/工具调用请求超时/.test(error.message)) {
+        const cid = (mcpClient.connection && mcpClient.connection.clientId) || null;
+        if (cid) {
+          console.warn(`⚠️ 工具调用超时，判定连接为僵尸并清理: ${cid}`);
+          this.handleDeviceDisconnect(cid);
+        }
+      }
       throw error;
     }
   }
 
   /**
    * 处理设备断开连接
+   * @param {string} clientId
+   * @param {object} [connection] 正在关闭的连接。设备重连时 clientId 不变，
+   *   旧连接的 close 事件可能晚于新连接的 MCP 注册到达，无主删除会把刚建好的
+   *   客户端连带清掉（表现为工具全部消失、拍照等调用报“硬件离线”）。传入连接
+   *   时做归属校验，仅当登记的仍是这条连接才清理；不传（僵尸连接判定路径）则
+   *   无条件清理。
    */
-  handleDeviceDisconnect(clientId) {
+  handleDeviceDisconnect(clientId, connection = null) {
     if (this.deviceClients.has(clientId)) {
+      const mc = this.deviceClients.get(clientId);
+      if (connection && mc && mc.connection && mc.connection !== connection) {
+        console.log(`🛡️ 跳过 MCP 客户端清理（clientId ${clientId} 已被新连接接管）`);
+        return;
+      }
       this.deviceClients.delete(clientId);
       this.refreshTools();
       console.log(`🔌 设备 ${clientId} 断开连接，清理MCP客户端`);
@@ -688,6 +845,56 @@ class DeviceMCPExecutor extends ToolExecutor {
 }
 
 /**
+ * HomeKit 灯具控制执行器（方案A：纯 Node HomeKit 控制器）
+ * 把 HomeKitService 发现的每台灯暴露为一个 function 工具，LLM 直接选工具+参数。
+ */
+class HomeKitExecutor extends ToolExecutor {
+  constructor(homekitService) {
+    super();
+    this.homekitService = homekitService;
+  }
+
+  getTools() {
+    const tools = {};
+    if (!this.homekitService || !this.homekitService.enabled) return tools;
+    for (const light of this.homekitService.getLights()) {
+      const toolName = this.homekitService.toolNameForLight(light.key);
+      const properties = {
+        power: { type: 'boolean', description: '开(true)/关(false)灯' },
+        brightness: { type: 'integer', minimum: 0, maximum: 100, description: '亮度百分比 0-100' }
+      };
+      if (light.hasColorTemp !== false && light.colorTempIid != null) {
+        properties.color_temp = { type: 'integer', minimum: 0, maximum: 100, description: '色温暖度百分比 0-100，0=最冷白，100=最暖' };
+      }
+      const funcDef = {
+        type: 'function',
+        function: {
+          name: toolName,
+          description: `控制${light.name}（HomeKit 智能灯）：开关、亮度${light.colorTempIid != null ? '、色温' : ''}。任何开/关/调亮度的请求都必须调用本工具（它会读取并操作设备真实状态并回传）；严禁凭对话历史口头臆断灯的开关状态而不调工具。`,
+          parameters: { type: 'object', properties, required: [] }
+        }
+      };
+      tools[toolName] = new ToolDefinition(toolName, funcDef, ToolType.HOMEKIT);
+    }
+    return tools;
+  }
+
+  hasTool(toolName) {
+    return this.homekitService.lightKeyFromTool(toolName) != null && this.homekitService.lights.size > 0;
+  }
+
+  async execute(connection, toolName, args) {
+    try {
+      const lightKey = this.homekitService.lightKeyFromTool(toolName);
+      const text = await this.homekitService.applyControl(lightKey, args);
+      return new ActionResponse(Action.REQLLM, null, text);
+    } catch (error) {
+      return new ActionResponse(Action.ERROR, error.message);
+    }
+  }
+}
+
+/**
  * MCP接入点执行器（简化版）
  */
 class MCPEndpointExecutor extends ToolExecutor {
@@ -720,6 +927,7 @@ export {
   ActionResponse,
   DeviceMCPClient,
   DeviceMCPExecutor,
+  HomeKitExecutor,
   MCPEndpointExecutor, ToolDefinition,
   ToolExecutor,
   ToolType

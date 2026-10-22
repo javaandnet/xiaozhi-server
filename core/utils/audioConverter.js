@@ -1,7 +1,19 @@
 import { spawn } from 'child_process';
+import fs from 'fs';
 import opusPkg from 'opusscript';
 const OpusEncoder = opusPkg.default || opusPkg;
 import { logger } from '../../utils/logger.js';
+
+// 解析 ffmpeg 可执行文件绝对路径：node 以 spawn 调用时不保证继承登录 shell 的 PATH
+// （homebrew 常装在 /opt/homebrew/bin，经 pm2/脚本启动的服务进程 PATH 可能缺失，导致 spawn ffmpeg ENOENT）。
+const FFMPEG_BIN = (() => {
+  const env = process.env.FFMPEG_PATH;
+  if (env && fs.existsSync(env)) return env;
+  for (const p of ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg']) {
+    if (fs.existsSync(p)) return p;
+  }
+  return 'ffmpeg';
+})();
 
 /**
  * 音频转换工具类
@@ -31,7 +43,7 @@ class AudioConverter {
         const encoder = new OpusEncoder(this.sampleRate, this.channels);
 
         // 使用FFmpeg将MP3转换为PCM
-        const ffmpegProcess = spawn('ffmpeg', [
+        const ffmpegProcess = spawn(FFMPEG_BIN, [
           '-i', 'pipe:0',        // 从stdin读取
           '-f', 's16le',         // 输出格式: 16位有符号小端PCM
           '-ar', '16000',        // 采样率: 16000Hz
@@ -122,7 +134,7 @@ class AudioConverter {
         const opusFrames = [];
         const encoder = new OpusEncoder(sampleRate, channels);
 
-        const ffmpegProcess = spawn('ffmpeg', [
+        const ffmpegProcess = spawn(FFMPEG_BIN, [
           '-i', 'pipe:0',
           '-f', 's16le',
           '-ar', String(sampleRate),

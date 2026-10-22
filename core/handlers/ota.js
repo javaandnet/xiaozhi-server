@@ -187,6 +187,12 @@ class OTAHandler {
 
       logger.info(`OTA请求: 设备ID=${deviceId}, ClientID=${clientId}, 型号=${deviceModel}, 版本=${deviceVersion}, MAC=${deviceMac}`);
 
+      // Device reported network info (firmware GetBoardJson: ssid/rssi/channel/ip)
+      const boardInfo = bodyData.board || {};
+      if (boardInfo.ssid) {
+        logger.info(`[OTA] Device network: ssid=${boardInfo.ssid}, rssi=${boardInfo.rssi}, channel=${boardInfo.channel}, ip=${boardInfo.ip}`);
+      }
+
       // 登记设备到注册表（OTA 是设备最可靠的身份来源：型号/固件版本/MAC）
       if (deviceId) {
         this._notifyDeviceReport({

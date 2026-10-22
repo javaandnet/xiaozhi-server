@@ -13,6 +13,8 @@ import { fileURLToPath } from 'url';
 import { channelLogger } from './utils/logger.js';
 import { getConfig, getServerConfig, getSttConfig, getTtsConfig, getLlmConfig, getChannelInfo } from './config/loader.js';
 import { resolveMockFlags } from './core/utils/devMode.js';
+import { resolveSharedToken } from './core/utils/sharedToken.js';
+import { compileExternalSystems } from './core/utils/externalSystems.js';
 
 // 导入 xiaozhi 核心组件
 import { initializeWebSocketHandler, handleWebSocketConnection } from './core/handlers/websocket.js';
@@ -26,6 +28,8 @@ import SttService from './core/services/stt.js';
 import VadService from './core/services/vad.js';
 import VoiceprintService from './core/services/voiceprint.js';
 import McpService from './core/services/mcp.js';
+import HomeKitService from './core/services/homekit.js';
+import { registerApiRoutes } from './core/routes/index.js';
 
 // standalone：不再依赖 gala 主进程与消息总线；LLM 走 bridge（config.llm.provider=openai/dsh）
 
@@ -46,6 +50,8 @@ export class XiaozhiChannel extends EventEmitter {
   constructor(config, bus) {
     super();
     this.config = config || {};
+    // Canonical config file for interface hot-reload (same anchor as setupRoutes ctx).
+    this.configPath = path.join(__dirname, 'config.json');
     this.bus = bus;
     this.name = CHANNEL_ID;
     this._running = false;
@@ -82,6 +88,32 @@ export class XiaozhiChannel extends EventEmitter {
   }
 
   /**
+   * 热重载外界接口配置（sharedToken / externalSystems / voiceFlow）。
+   * 由 Firmware Studio 「接口管理」页在写回 config.json 后调用：重新读取文件、
+   * 就地解析 $shared 并编译注册表，再把影响接口的段合并回运行中的 this.config（
+   * 原地改字段、不换对象引用，以免下游持引的模块看到旧 config）。
+   * @returns {{systems:string[], employee:boolean, voiceFlowToken:boolean}}
+   */
+  reloadInterfaces() {
+    const raw = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
+    resolveSharedToken(raw);
+    compileExternalSystems(raw, channelLogger);
+    // Merge only the interface-affecting sections; leave all other runtime config untouched.
+    this.config.sharedToken = raw.sharedToken;
+    this.config.externalSystems = raw.externalSystems;
+    this.config.voiceFlow = raw.voiceFlow;
+    if (raw.employee !== undefined) this.config.employee = raw.employee;
+    else delete this.config.employee;
+    const summary = {
+      systems: Object.keys(raw.externalSystems || {}),
+      employee: !!(this.config.employee && this.config.employee.enabled),
+      voiceFlowToken: !!this.config.voiceFlow?.token
+    };
+    channelLogger.info(`[interfaces] reloaded: systems=${summary.systems.join(',') || '(none)'}, employee=${summary.employee}, voiceFlow.token=${summary.voiceFlowToken ? 'set' : 'unset'}`);
+    return summary;
+  }
+
+  /**
    * 启动xiaozhi频道
    */
   async start() {
@@ -94,6 +126,13 @@ export class XiaozhiChannel extends EventEmitter {
     try {
       channelLogger.logModuleStart({ component: 'xiaozhi_channel' });
       console.log(`[${CHANNEL_ID}] Starting Xiaozhi channel...`);
+
+      // Resolve "$shared" / "env:" token references from the top-level sharedToken
+      // BEFORE services/handlers read config.employee & config.voiceFlow.
+      resolveSharedToken(this.config);
+      // Compile the externalSystems registry into the runtime employee/voiceFlow
+      // views (same flat shape; registry is source, legacy sections override on conflict).
+      compileExternalSystems(this.config);
 
       // 初始化核心服务
       await this.initializeServices();
@@ -139,6 +178,11 @@ export class XiaozhiChannel extends EventEmitter {
       // 从消息总线注销
       this.unregisterFromBus();
 
+      // 停止心跳保活
+      if (this.webSocketHandler) {
+        this.webSocketHandler.stopHeartbeat();
+      }
+
       // 停止WebSocket服务器
       if (this.wss) {
         this.wss.close();
@@ -171,6 +215,11 @@ export class XiaozhiChannel extends EventEmitter {
   ensureStore() {
     if (!this.store) {
       this.store = new XiaozhiStore();
+      // 进程新起时尚无任何连接，复位上一进程残留的陈旧 online=1 标记（在线状态以实时连接为准）
+      try {
+        const n = this.store.markAllOffline();
+        if (n) logger.info(`[Store] 复位陈旧在线标记: ${n} 台 → 离线`);
+      } catch (e) { /* 忽略 */ }
     }
     return this.store;
   }
@@ -199,8 +248,9 @@ export class XiaozhiChannel extends EventEmitter {
       this.mockFlags = resolveMockFlags(this.config);
       this._applyMockProviders(this.mockFlags);
 
-      this.llmService = new LlmService(this.config.llm || getLlmConfig());
-      this.ttsService = new TtsService(this.config.tts || getTtsConfig());
+      const defaultLang = this.config.language?.default || 'zh';
+      this.llmService = new LlmService({ ...(this.config.llm || getLlmConfig()), defaultLanguage: defaultLang, practice: this.config.practice || {}, timezoneOffset: this.config.server?.timezone_offset });
+      this.ttsService = new TtsService({ ...(this.config.tts || getTtsConfig()), defaultLanguage: defaultLang });
       this.sttService = new SttService(this.config.stt || getSttConfig());
       this.vadService = new VadService();
       this.voiceprintService = new VoiceprintService();
@@ -213,6 +263,15 @@ export class XiaozhiChannel extends EventEmitter {
       await this.vadService.initialize();
       await this.voiceprintService.initialize();
       await this.mcpService.initialize();
+
+      // HomeKit 控制器（方案A）：启动发现/配对并将灯具注入 MCP 工具池。不阻断启动。
+      this.homekitService = new HomeKitService(this.config.homekit || {});
+      try {
+        await this.homekitService.start();
+      } catch (e) {
+        channelLogger.warn(`[xiaozhi] HomeKit startup skipped: ${e.message}`);
+      }
+      this.mcpService.setHomeKitService(this.homekitService);
 
       // standalone：无 gala 实例；总线为空实现
       this.gala = null;
@@ -277,6 +336,9 @@ export class XiaozhiChannel extends EventEmitter {
       store: this.store,
       gala: this.gala  // standalone 恒为 null
     });
+    // Keep-alive heartbeat: prevents firmware 120s incoming-timeout and NAT
+    // idle-drop from silently reconnecting devices (loses rest-mode display).
+    this.webSocketHandler.startHeartbeat();
   }
 
   /**
@@ -286,6 +348,23 @@ export class XiaozhiChannel extends EventEmitter {
     this.app = express();
     this.server = http.createServer(this.app);
     this.wss = new WebSocketServer({ server: this.server });
+
+    // Unify local/cloud access paths: strip the /xiaozhi prefix for page and
+    // management API requests so the same URLs work behind the cloud nginx
+    // (which proxies /xiaozhi/* verbatim). Device protocol endpoints
+    // (/xiaozhi/ota/, /xiaozhi/v1/) are registered natively and untouched.
+    this.app.use((req, res, next) => {
+      if (req.url === '/xiaozhi') {
+        req.url = '/';
+      } else if (
+        req.url.startsWith('/xiaozhi/') &&
+        !req.url.startsWith('/xiaozhi/ota') &&
+        !req.url.startsWith('/xiaozhi/v1')
+      ) {
+        req.url = req.url.slice('/xiaozhi'.length);
+      }
+      next();
+    });
 
     // 中间件配置
     this.app.use(express.json());
@@ -321,223 +400,33 @@ export class XiaozhiChannel extends EventEmitter {
       res.json({
         status: 'ok',
         channel: CHANNEL_ID,
-        devices: this.deviceManager ? Object.keys(this.deviceManager.devices || {}).length : 0,
+        // devices = 在线连接数：deviceManager.devices 是 Map，Object.keys(Map) 恒为 []
+        devices: this.deviceManager ? this.deviceManager.getOnlineDevices().length : 0,
         uptime: process.uptime()
       });
     });
 
-    // 音频有效性(VAD振幅)阈值配置：读取 + 热更新 + 持久化 config.json
-    this.app.get('/api/settings/audio', (req, res) => {
-      const audio = this.config?.audio || {};
-      const vad = this.config?.vad || {};
-      res.json({
-        ok: true,
-        thresholds: {
-          minMaxAmplitude: audio.minMaxAmplitude ?? 500,
-          minAvgAmplitude: audio.minAvgAmplitude ?? 50,
-          silenceThresholdMs: vad.silenceThresholdMs ?? 1500
-        }
-      });
-    });
-
-    this.app.post('/api/settings/audio', (req, res) => {
-      const max = Number.parseInt(req.body?.minMaxAmplitude, 10);
-      const avg = Number.parseInt(req.body?.minAvgAmplitude, 10);
-      const silence = Number.parseInt(req.body?.silenceThresholdMs, 10);
-      if (!Number.isInteger(max) || !Number.isInteger(avg) || max < 0 || max > 10000 || avg < 0 || avg > 10000) {
-        return res.status(400).json({ ok: false, error: '振幅阈值须为 0~10000 的整数' });
-      }
-      if (!Number.isInteger(silence) || silence < 300 || silence > 5000) {
-        return res.status(400).json({ ok: false, error: '静默阈值须为 300~5000ms 的整数' });
-      }
-      // 热更新运行时处理器默认阈值（对未设置设备专属阈值的会话立即可效）
-      const handler = initializeWebSocketHandler();
-      handler.updateAudioThresholds({ minMaxAmplitude: max, minAvgAmplitude: avg, silenceThresholdMs: silence });
-      this.config.audio = { ...(this.config.audio || {}), minMaxAmplitude: max, minAvgAmplitude: avg };
-      this.config.vad = { ...(this.config.vad || {}), silenceThresholdMs: silence };
-      // 持久化 config.json
-      let persisted = false;
-      try {
-        const cfgPath = path.join(__dirname, 'config.json');
-        const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-        raw.audio = { ...(raw.audio || {}), minMaxAmplitude: max, minAvgAmplitude: avg };
-        raw.vad = { ...(raw.vad || {}), silenceThresholdMs: silence };
-        fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
-        persisted = true;
-      } catch (e) {
-        channelLogger.warn(`config.json 持久化失败: ${e.message}`);
-      }
-      res.json({
-        ok: true,
-        thresholds: { ...handler.defaultAudioThresholds, silenceThresholdMs: this.config.vad.silenceThresholdMs },
-        persisted
-      });
-    });
-
-    // 模式切换触发词（前台自由定义）：config.json → modeKeywords。
-    // 识别文本去标点后与短语全等即命中；保存即热生效（匹配处实时读 config）。
-    const MODE_KW_KEYS = ['employeeOn', 'employeeOff', 'restOn', 'restOff'];
-    this.app.get('/api/settings/mode-keywords', (_req, res) => {
-      const kw = this.config?.modeKeywords || {};
-      res.json({ ok: true, modeKeywords: Object.fromEntries(MODE_KW_KEYS.map((k) => [k, Array.isArray(kw[k]) ? kw[k] : []])) });
-    });
-
-    this.app.post('/api/settings/mode-keywords', (req, res) => {
-      const input = req.body?.modeKeywords || {};
-      const clean = {};
-      for (const k of MODE_KW_KEYS) {
-        const list = Array.isArray(input[k]) ? input[k] : [];
-        clean[k] = [...new Set(list.map((p) => String(p).trim()).filter(Boolean))];
-        if (clean[k].length > 20) return res.status(400).json({ ok: false, error: `每组最多 20 个短语（${k}）` });
-        if (clean[k].some((p) => p.length > 30)) return res.status(400).json({ ok: false, error: `单个短语最长 30 字（${k}）` });
-      }
-      // 安全闸门：休息模式必须保留至少一个退出词，否则设备将无法被语音唤醒回聊天
-      if (!clean.restOff.length) return res.status(400).json({ ok: false, error: '必须至少保留一个“退出休息”短语' });
-      this.config.modeKeywords = clean;
-      let persisted = false;
-      try {
-        const cfgPath = path.join(__dirname, 'config.json');
-        const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-        raw.modeKeywords = clean;
-        fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
-        persisted = true;
-      } catch (e) {
-        channelLogger.warn(`config.json 持久化失败: ${e.message}`);
-      }
-      res.json({ ok: true, modeKeywords: clean, persisted });
-    });
-
-    // 备用服务器地址 server1（xiaozhi-server 可改）：设备主地址(server0)连不上时自动切此备用。
-    // server0 沿用原逻辑（自动探测本机IP / config.server.websocket 覆盖），本接口只维护 server1。
-    this.app.get('/api/settings/server-fallback', (_req, res) => {
-      const srv = this.config?.server || {};
-      res.json({ ok: true, server0: srv.websocket || '', server1: srv.websocket_fallback || '' });
-    });
-
-    this.app.post('/api/settings/server-fallback', (req, res) => {
-      const value = String(req.body?.server1 ?? '').trim();
-      if (value && !/^wss?:\/\//i.test(value)) {
-        return res.status(400).json({ ok: false, error: 'server1 必须是以 ws:// 或 wss:// 开头的完整地址' });
-      }
-      this.config.server = this.config.server || {};
-      this.config.server.websocket_fallback = value;
-      // OTAHandler 拿的是启动时的 server 快照，这里同步刷新以便热生效
-      if (this.otaHandler && this.otaHandler.config) {
-        this.otaHandler.config.server = this.otaHandler.config.server || {};
-        this.otaHandler.config.server.websocket_fallback = value;
-      }
-      let persisted = false;
-      try {
-        const cfgPath = path.join(__dirname, 'config.json');
-        const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-        raw.server = raw.server || {};
-        raw.server.websocket_fallback = value;
-        fs.writeFileSync(cfgPath, JSON.stringify(raw, null, 2));
-        persisted = true;
-      } catch (e) {
-        channelLogger.warn(`config.json 持久化失败: ${e.message}`);
-      }
-      res.json({ ok: true, server1: value, persisted });
-    });
-
-    // 断开指定在线设备的 WebSocket 连接（管理操作，自旧 manage 页合并并真实实现）
-    this.app.post('/api/disconnect', (req, res) => {
-      const clientId = String(req.body?.clientId || '').trim();
-      if (!clientId) {
-        return res.status(400).json({ success: false, error: '缺少 clientId' });
-      }
-      const handler = this.webSocketHandler || initializeWebSocketHandler();
-      const closed = handler.closeDevice(clientId);
-      res.json({ success: closed, ...(closed ? {} : { error: '设备不在线或未找到' }) });
-    });
-
-    // 设备管理API（当前在线设备，Map 需转数组才能正确序列化）
-    this.app.get('/api/devices', (req, res) => {
-      if (this.deviceManager) {
-        res.json(this.deviceManager.getAllDevices().map(d => d.toJSON()));
-      } else {
-        res.status(500).json({ error: 'Device manager not initialized' });
-      }
-    });
-
-    // 已知设备列表（含离线，来自持久化设备注册表）
-    this.app.get('/api/devices/known', (req, res) => {
-      const store = this.ensureStore();
-      const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-      const offset = parseInt(req.query.offset, 10) || 0;
-      res.json(store.listDevices({ limit, offset }));
-    });
-
-    // 设备/对话统计
-    this.app.get('/api/devices/stats', (req, res) => {
-      const store = this.ensureStore();
-      res.json({
-        live: this.deviceManager ? this.deviceManager.getStats() : null,
-        registered: store.getStats()
-      });
-    });
-
-    // 对话记录查询（支持 deviceId / role / limit / offset 过滤）
-    this.app.get('/api/conversations', (req, res) => {
-      const store = this.ensureStore();
-      const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-      const offset = parseInt(req.query.offset, 10) || 0;
-      const { deviceId, role } = req.query;
-      res.json(store.listConversations({
-        deviceId: deviceId || null,
-        role: (role === 'user' || role === 'bot') ? role : null,
-        limit,
-        offset
-      }));
-    });
-
-    // 会话管理API
-    this.app.get('/api/sessions', (req, res) => {
-      if (this.sessionManager) {
-        res.json(this.sessionManager.sessions || {});
-      } else {
-        res.status(500).json({ error: 'Session manager not initialized' });
-      }
-    });
-
-    // 语音放送 API（由 Gala Web /api/channels/xiaozhi/broadcast 代理调用，
-    // 也供局域网内直接推送）。合成+推流耗时，先验设备再受理后异步发送。
-    this.app.post('/api/broadcast', (req, res) => {
-      const text = String(req.body?.text || '').trim();
-      if (!text) {
-        return res.status(400).json({ success: false, error: 'text 不能为空' });
-      }
-      if (!this.webSocketHandler) {
-        return res.status(500).json({ success: false, error: 'WebSocket handler 未初始化' });
-      }
-      const deviceId = req.body?.deviceId || null;
-      const targets = this.webSocketHandler.getBroadcastTargets(deviceId);
-      if (targets.length === 0) {
-        return res.status(404).json({ success: false, error: '没有在线的小智设备' });
-      }
-      this.webSocketHandler.broadcastToDevices(text, { deviceId })
-        .then(r => console.log(`[xiaozhi] broadcast done: ${JSON.stringify(r)}`))
-        .catch(e => console.error('[xiaozhi] broadcast failed:', e.message));
-      res.json({ success: true, accepted: true, devices: targets.length, message: 'broadcast queued' });
-    });
-
-    // WebSocket URL 信息 API - 提供 WS 和 WSS 两种协议
-    this.app.get('/api/websocket/urls', (req, res) => {
-      const useHttps = process.env.USE_HTTPS === 'true' || false;
-      const protocol = useHttps ? 'wss' : 'ws';
-
-      res.json({
-        message: 'WebSocket连接信息',
-        urls: {
-          ws: `ws://${this.host}:${this.port}/xiaozhi/v1/`,
-          wss: `wss://${this.host}:${this.port}/xiaozhi/v1/`
-        },
-        current: `${protocol}://${this.host}:${this.port}/xiaozhi/v1/`,
-        use_https: useHttps,
-        port: this.port,
-        host: this.host
-      });
-    });
+    // Feature API routes live in core/routes/* (extracted from this closure).
+    // ctx exposes live service references via getters (services are hot-replaced
+    // after start), never snapshots. /health stays above; OTA + WS protocol below.
+    const self = this;
+    const ctx = {
+      configPath: path.join(__dirname, 'config.json'),
+      get config() { return self.config; },
+      get deviceManager() { return self.deviceManager; },
+      get sessionManager() { return self.sessionManager; },
+      get webSocketHandler() { return self.webSocketHandler; },
+      get mcpService() { return self.mcpService; },
+      get homekitService() { return self.homekitService; },
+      get otaHandler() { return self.otaHandler; },
+      get llmService() { return self.llmService; },
+      get ttsService() { return self.ttsService; },
+      get store() { return self.store; },
+      get host() { return self.host; },
+      get port() { return self.port; },
+      ensureStore: () => self.ensureStore()
+    };
+    registerApiRoutes(this.app, ctx);
 
     // OTA 路由（保持与原始 xiaozhi 项目兼容）
     this.app.get('/xiaozhi/ota/', (req, res) => {
@@ -692,8 +581,9 @@ export class XiaozhiChannel extends EventEmitter {
       running: this._running,
       port: this.port,
       host: this.host,
-      devices: this.deviceManager ? Object.keys(this.deviceManager.devices || {}).length : 0,
-      sessions: this.sessionManager ? Object.keys(this.sessionManager.sessions || {}).length : 0
+      // devices/sessions 均为 Map，Object.keys(Map) 恒为 []，统一取在线/总数口径
+      devices: this.deviceManager ? this.deviceManager.getOnlineDevices().length : 0,
+      sessions: this.sessionManager ? (this.sessionManager.sessions?.size || 0) : 0
     };
   }
 }

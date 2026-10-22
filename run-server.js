@@ -11,8 +11,9 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
-import { createStudioRouter } from './studio/routes.js';
+import { createStudioRouter, createManageAuth } from './studio/routes.js';
 import { studioConfig } from './studio/config.js';
+import { streamStart, streamStop, streamStatus, facesList } from './studio/lib/masterpi.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
@@ -36,6 +37,30 @@ async function main() {
 
   // Mount the Firmware Studio onto the SAME server (single process, single port).
   if (channel.app) {
+    // Console login: config.json manage.password (empty = open access, local default)
+    studioConfig.managePassword = (config.manage && config.manage.password) || process.env.XIAOZHI_MANAGE_PASSWORD || '';
+    channel.app.use('/firmware', createManageAuth(studioConfig));
+
+    // Login page: the built Element Plus console login (studio/web) when present,
+    // otherwise the standalone legacy login.html.
+    const appDir = path.join(__dirname, 'studio', 'public', 'app');
+    const builtLogin = path.join(appDir, 'login.html');
+    const nsOf = (req) => (String(req.originalUrl || '').startsWith('/xiaozhi') ? '/xiaozhi' : '');
+    channel.app.get('/firmware/login', (req, res) => {
+      if (fs.existsSync(builtLogin)) {
+        const back = req.query.redirect ? `?redirect=${encodeURIComponent(String(req.query.redirect))}` : '';
+        return res.redirect(`${nsOf(req)}/firmware/app/login.html${back}`);
+      }
+      return res.sendFile(path.join(__dirname, 'studio', 'public', 'login.html'));
+    });
+
+    // Canonical console is the built SFC app (studio/web -> public/app).
+    // The legacy single-file console (studio/public/index.html) is retired; keep
+    // old entry URLs and bookmarks redirecting to the SFC build.
+    channel.app.get(['/firmware', '/firmware/', '/firmware/index.html'], (req, res) => {
+      res.redirect(`${nsOf(req)}/firmware/app/`);
+    });
+
     // Vendor assets for the no-build Vue 3 + Element Plus workbench UI.
     const nm = path.join(__dirname, 'node_modules');
     const vendorFiles = {
@@ -45,13 +70,28 @@ async function main() {
       '/element-plus-dark.css': 'element-plus/theme-chalk/dark/css-vars.css',
       '/icons.js': '@element-plus/icons-vue/dist/index.iife.min.js',
       '/locale-zh-cn.js': 'element-plus/dist/locale/zh-cn.min.js',
+      '/esptool.js': 'esptool-js/bundle.js',
     };
     for (const [u, rel] of Object.entries(vendorFiles)) {
       channel.app.get(`/firmware/vendor${u}`, (req, res) => res.sendFile(path.join(nm, rel)));
     }
     channel.app.use('/firmware', express.static(path.join(__dirname, 'studio', 'public')));
-    channel.app.use('/firmware/api', createStudioRouter(studioConfig));
+    channel.app.use('/firmware/api', createStudioRouter(studioConfig, {
+      // Interface-management page writes the SAME config.json the running server
+      // loaded, then asks it to re-resolve/re-compile in place (no restart).
+      configPath,
+      onInterfacesChanged: () => channel.reloadInterfaces(),
+    }));
+
+    // MasterPi 人脸登记 LAN 控制口（免鉴权，与 /api/homekit/* /api/mcp/call 同级可信）：
+    // 摄像头 MJPEG 预览的启停/状态 + 人脸库列表。登记/云台微调/登录走 /api/mcp/call 直调身体。
+    channel.app.get('/api/masterpi/stream/status', (_req, res) => { try { res.json(streamStatus(studioConfig)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); } });
+    channel.app.post('/api/masterpi/stream/start', (_req, res) => { try { res.json(streamStart(studioConfig)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); } });
+    channel.app.post('/api/masterpi/stream/stop', (_req, res) => { try { res.json(streamStop(studioConfig)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); } });
+    channel.app.get('/api/masterpi/faces', (_req, res) => { try { res.json(facesList(studioConfig)); } catch (e) { res.status(500).json({ ok: false, error: e.message }); } });
+
     console.log(`   工作台 : http://localhost:${config.port}/firmware/  (data/bin -> ${studioConfig.dataBinDir})`);
+    console.log(`   工作台(工程版 Vue+ElementPlus) : http://localhost:${config.port}/firmware/app/${fs.existsSync(builtLogin) ? '' : '  [not built: pnpm --dir studio/web build]'}`);
   }
 
   console.log('\n==================================================');
