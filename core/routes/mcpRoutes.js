@@ -4,7 +4,73 @@
  */
 import { vfAuthorized } from './auth.js';
 
+/**
+ * Merge two device-provider status payloads (local hub + home branch) into one view.
+ * Dedup by stable key (mac -> deviceId -> clientId), home entries last-wins over local.
+ * Derived counts recomputed from merged providers; totalTools taken from local (cloud).
+ */
+function mergeProviderStatus(local, remote) {
+  const byKey = new Map();
+  const put = (p) => {
+    if (!p) return;
+    const key = (p.mac && String(p.mac).toLowerCase())
+      || (p.deviceId && String(p.deviceId).toLowerCase())
+      || String(p.clientId || '').toLowerCase();
+    if (key) byKey.set(key, p);
+  };
+  (local.providers || []).forEach(put);
+  ((remote && remote.providers) || []).forEach(put);
+  const providers = Array.from(byKey.values());
+  const bodies = providers.filter((p) => p.robot);
+  return {
+    providers,
+    readyProviders: providers.filter((p) => p.ready).length,
+    totalTools: local.totalTools || 0,
+    robotReadyProviders: bodies.filter((p) => p.ready).length,
+    robotTotalTools: bodies.reduce((n, p) => n + (p.ready ? (p.toolCount || 0) : 0), 0),
+  };
+}
+
 export function registerMcpRoutes(app, ctx) {
+  // Peer-link federation (hub/cloud): robot bodies (device-MCP providers) live
+  // on the home LAN, so while the branch is online status/tools/call are
+  // executed at home and relayed back. Query strings ride along in the path.
+  const mlink = ctx.peerLink;
+  if (mlink && mlink.isHub) {
+    app.use('/api/mcp', async (req, res, next) => {
+      const sub = req.path; // e.g. '/status', '/tools', '/call'
+      // Loop guard: a request that already rode the peer channel executes locally.
+      if (req.headers['x-peer-via']) return next();
+      const online = mlink.branchOnline();
+
+      if (sub === '/status') {
+        // Merge local (this hub) providers with home-side providers so the console sees
+        // both cloud-direct bodies and any bodies still living at home. Offline -> local only.
+        const local = ctx.mcpService.getDeviceProviderStatus();
+        if (!online) return res.json(local);
+        const r = await mlink.dispatch('GET', '/api/mcp/status', null, 15000);
+        if (r.error) return res.json(local);
+        return res.json(mergeProviderStatus(local, r.body));
+      }
+
+      // /tools and /call: only relay home when this hub has no such provider locally.
+      // A cloud-direct body (registered here) is served here; home-only bodies still forward.
+      const deviceKey = sub === '/call'
+        ? String((req.body && req.body.device) || '')
+        : String(req.query.device || '');
+      const localHas = deviceKey && ctx.mcpService.hasLocalProvider(deviceKey);
+      if (!localHas && online && (sub === '/tools' || sub === '/call')) {
+        const timeoutMs = sub === '/call' ? 40000 : 15000;
+        const r = await mlink.dispatch(req.method, '/api/mcp' + req.url, sub === '/call' ? (req.body ?? null) : null, timeoutMs);
+        if (!r.error) {
+          return res.status(r.httpStatus).json({ ...(r.body || {}), via: 'home' });
+        }
+        console.warn(`[xiaozhi] mcp peer forward failed (${sub}): ${r.error}`);
+      }
+      return next();
+    });
+  }
+
   // 机器人硬件（device-MCP 工具提供方）在线状态：管理平台展示“硬件是否在线 / 可用工具数”
   app.get('/api/mcp/status', (req, res) => {
     try {

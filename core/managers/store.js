@@ -210,6 +210,31 @@ class XiaozhiStore {
     }
   }
 
+  /** 反查绑定到某机器人身体（settings.robot.body）的小智语音设备。
+   *  bodyKey 大小写不敏感；多台命中优先取在线行。无命中返回 null。
+   *  用于跨实例场景：本机（branch）持有绑定关系但语音设备连在对端（hub）时，
+   *  先解析出 deviceId，再带 deviceId 走 peer 转发。 */
+  findVoiceDeviceByBody(bodyKey) {
+    if (this.disabled || !bodyKey) return null;
+    const want = String(bodyKey).trim().toLowerCase();
+    if (!want) return null;
+    try {
+      const rows = this.db.prepare(
+        `SELECT device_id, mac, settings, online FROM ${TABLE_DEVICES} WHERE settings IS NOT NULL ORDER BY online DESC, last_seen DESC`
+      ).all();
+      for (const r of rows) {
+        let s;
+        try { s = JSON.parse(r.settings); } catch { continue; }
+        const body = s && s.robot && s.robot.body ? String(s.robot.body).trim().toLowerCase() : null;
+        if (body && body === want) return r.device_id || r.mac || null;
+      }
+      return null;
+    } catch (e) {
+      logger.warn(`findVoiceDeviceByBody 失败(${bodyKey}): ${e.message}`);
+      return null;
+    }
+  }
+
   /** 写 per-device 设定（整体覆盖）；仅限已登记设备，无行返回 false
    *  同身份的所有同步行，保证后续无论设备以哪种大小写上报都读到同一设定 */
   setDeviceSettings(deviceId, settings = {}) {

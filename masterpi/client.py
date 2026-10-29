@@ -50,6 +50,10 @@ CONNECT_RETRY = 5
 BACKOFF_START = 2
 BACKOFF_MAX = 30
 MIN_STABLE_SEC = 20
+# 僵尸连接看门狗：TCP 半死(对端换进程但未回 RST)时库层 keepalive 可能无感，
+# 定期主动发 WS ping 并要求限时 pong，超时即判僵尸、主动断开触发 supervisor 重连。
+ZOMBIE_PING_SEC = 45
+ZOMBIE_PONG_TIMEOUT_SEC = 15
 
 
 class MasterPiClient:
@@ -145,6 +149,22 @@ class MasterPiClient:
         else:
             log.info("ignore mcp method=%s", method)
 
+    async def _zombie_watchdog(self, ws, url):
+        """App-level watchdog against half-dead TCP: active ping with bounded pong.
+        On timeout treat the session as zombie, close it and let the supervisor reconnect."""
+        while True:
+            await asyncio.sleep(ZOMBIE_PING_SEC)
+            try:
+                pong = await ws.ping()
+                await asyncio.wait_for(pong, timeout=ZOMBIE_PONG_TIMEOUT_SEC)
+            except Exception as e:  # log and force reconnect, never swallow silently
+                log.warning("zombie watchdog: %s dead (%s), forcing reconnect", url, e)
+                try:
+                    await ws.close()
+                except Exception as ce:  # best-effort
+                    log.debug("watchdog close ignored: %s", ce)
+                return
+
     async def _run_once(self, url):
         """Connect to one server and run the message loop until it ends.
         Returns (established, duration_sec): established=True once the WS is open
@@ -158,6 +178,7 @@ class MasterPiClient:
             return False, 0.0
         start = asyncio.get_event_loop().time()
         established = True
+        watchdog = asyncio.create_task(self._zombie_watchdog(ws, url))
         try:
             await self._send_hello(ws)
             async for raw in ws:
@@ -174,10 +195,12 @@ class MasterPiClient:
                     await self._handle_mcp(ws, msg.get("payload", {}) or {})
                 # other types (TTS/LSTN/stt...) are irrelevant for a dumb device
         except asyncio.CancelledError:
+            watchdog.cancel()
             raise
         except Exception as e:  # connection dropped mid-session
             log.warning("session on %s dropped: %s", url, e)
         finally:
+            watchdog.cancel()
             try:
                 await ws.close()
             except Exception as e:  # best-effort close

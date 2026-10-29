@@ -18,6 +18,13 @@ struct SpeakPayload: Encodable {
     let text: String
 }
 
+struct DeviceCommandPayload: Encodable {
+    let device: String
+    let text: String
+    let speak: Bool
+    let kind: String
+}
+
 /// 设备面板状态：拉取健康 + 实时在线设备 + 已登记设备，并下发播报/唤醒指令。
 /// 服务端无事件流，靠下拉刷新 / 定时轮询感知在线变化（10s）。
 @MainActor
@@ -86,6 +93,31 @@ final class DevicesViewModel: ObservableObject {
                 actionMessage = (ack.ok == true)
                     ? "已排队播报 → \(ack.devices ?? 0) 台设备"
                     : "播报失败：\(ack.error ?? "未知错误")"
+            }
+        } catch let e as APIError {
+            actionMessage = e.errorDescription
+        } catch {
+            actionMessage = error.localizedDescription
+        }
+    }
+
+    /// 自然语言命令：服务端模拟对该小智设备说话（listen/detect/text 正链路），
+    /// 工具执行与二轮 TTS 回复均由设备自身会话完成；设备须在线，否则服务端报错。
+    func command(text: String, deviceId: String) async {
+        actionMessage = nil
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { actionMessage = "命令内容不能为空"; return }
+        guard !deviceId.isEmpty else { actionMessage = "命令需选中具体在线设备"; return }
+        do {
+            let ack = try await APIClient.shared.post(XZDeviceCommandAck.self, Endpoint.deviceCommand,
+                                                      body: DeviceCommandPayload(device: deviceId,
+                                                                                 text: trimmed,
+                                                                                 speak: true,
+                                                                                 kind: "voice"))
+            if ack.ok == true {
+                actionMessage = "命令已送达 → \(ack.spoken ?? deviceId) 将处理并语音回复"
+            } else {
+                actionMessage = "命令失败：\(ack.error ?? "未知错误")"
             }
         } catch let e as APIError {
             actionMessage = e.errorDescription

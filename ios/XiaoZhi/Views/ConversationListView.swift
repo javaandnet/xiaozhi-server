@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// 对话记录：可按设备过滤，展示服务端最近转写（user 问 / bot 答），支持下拉刷新。
+/// 对话记录：必须选定具体设备后才显示该设备的转写（user 问 / bot 答），支持下拉刷新。
 struct ConversationListView: View {
     @ObservedObject var vm: ConversationsViewModel
+
+    private var deviceSelected: Bool { !vm.selectedDeviceId.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -12,7 +14,7 @@ struct ConversationListView: View {
                         get: { vm.selectedDeviceId },
                         set: { id in Task { await vm.selectDevice(id) } }
                     )) {
-                        Text("全部设备").tag("")
+                        Text("请选择设备").tag("")
                         ForEach(vm.devices) { d in
                             Text("\(d.displayName)（\(d.keyId)）").tag(d.keyId)
                         }
@@ -27,23 +29,24 @@ struct ConversationListView: View {
                             .foregroundStyle(.red).font(.callout)
                     }
                 }
-                Section {
-                    if vm.conversations.isEmpty {
-                        Text(vm.isLoaded ? "暂无对话记录" : "加载中…")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(vm.conversations) { item in row(item) }
+                if deviceSelected {
+                    Section {
+                        if vm.conversations.isEmpty {
+                            Text(vm.isLoaded ? "暂无对话记录" : "加载中…")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(vm.conversations) { item in row(item) }
+                        }
+                    } header: {
+                        Text("最近对话 · 共 \(vm.total) 条")
                     }
-                } header: {
-                    Text("最近对话 · 共 \(vm.total) 条")
                 }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("对话记录")
-            .refreshable { await vm.refresh() }
+            .refreshable { if deviceSelected { await vm.refresh() } }
             .task {
                 await vm.loadDevicesIfNeeded()
-                if !vm.isLoaded { await vm.refresh() }
             }
         }
     }

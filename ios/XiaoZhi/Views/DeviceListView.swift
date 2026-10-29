@@ -1,22 +1,39 @@
 import SwiftUI
 
-/// 设备面板：服务状态 + 播报/唤醒控制台 + 已登记设备（含在线/休息/离线状态）。
+/// 设备面板：服务状态 + 已登记设备（顶部按在线状态过滤）。
+/// 在线设备方可进入详情页进行设定与播报/命令/唤醒（详情页内集成）。
 struct DeviceListView: View {
     @ObservedObject var vm: DevicesViewModel
 
-    @State private var text: String = ""
-    @State private var targetId: String = ""     // "" = 全部在线设备
-    @State private var sending = false
+    /// 顶部过滤器：在线状态
+    private enum StatusFilter: String, CaseIterable, Identifiable {
+        case all = "全部"
+        case online = "在线"
+        case resting = "休息"
+        case offline = "离线"
+        var id: String { rawValue }
+    }
+
+    @State private var filter: StatusFilter = .all
     @State private var showKnown = true
+
+    private var filteredDevices: [XZKnownDevice] {
+        switch filter {
+        case .all: return vm.knownDevices
+        case .online: return vm.knownDevices.filter { $0.isOnline }
+        case .resting: return vm.knownDevices.filter { $0.isResting && !$0.isOnline }
+        case .offline: return vm.knownDevices.filter { !$0.isOnline && !$0.isResting }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             List {
                 Section { statusRow } header: { Text("服务状态") }
-                Section { controlPanel } header: { Text("播报 / 唤醒") }
+                Section { filterPicker } header: { Text("过滤") }
                 Section { knownSection } header: {
                     HStack {
-                        Text("设备 · \(vm.knownDevices.count)（在线 \(vm.onlineCount)）")
+                        Text("设备 · \(filteredDevices.count)（在线 \(vm.onlineCount)）")
                         Spacer()
                         Button(showKnown ? "收起" : "展开") { showKnown.toggle() }
                             .font(.caption)
@@ -26,7 +43,7 @@ struct DeviceListView: View {
             .listStyle(.insetGrouped)
             .navigationTitle("小智设备")
             .navigationDestination(for: XZKnownDevice.self) { d in
-                DeviceDetailView(device: d)
+                DeviceDetailView(device: d, vm: vm)
             }
             .refreshable { await vm.refresh() }
             .overlay { if !vm.isLoaded { ProgressView("连接中…") } }
@@ -56,70 +73,20 @@ struct DeviceListView: View {
         }
     }
 
-    @ViewBuilder private var controlPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            TextEditor(text: $text)
-                .frame(minHeight: 72)
-                .font(.body)
-                .overlay(alignment: .topLeading) {
-                    if text.isEmpty {
-                        Text("要播报给小智的文字…")
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 8).padding(.leading, 5)
-                            .allowsHitTesting(false)
-                    }
-                }
-
-            Picker("目标设备", selection: $targetId) {
-                Text("全部在线设备").tag("")
-                ForEach(vm.knownDevices) { d in
-                    Text("\(d.displayName)（\(d.isOnline ? "在线" : d.isResting ? "休息" : "离线")）")
-                        .tag(d.keyId)
-                }
-            }
-            .pickerStyle(.menu)
-
-            HStack(spacing: 12) {
-                Button {
-                    Task {
-                        sending = true
-                        await vm.broadcast(text: text, deviceId: targetId.isEmpty ? nil : targetId)
-                        sending = false
-                    }
-                } label: {
-                    Label(sending ? "发送中…" : "播报", systemImage: "speaker.wave.2.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(sending || text.trimmed.isEmpty)
-
-                Button {
-                    Task {
-                        sending = true
-                        await vm.wake(deviceId: targetId.isEmpty ? nil : targetId)
-                        sending = false
-                    }
-                } label: {
-                    Label("唤醒", systemImage: "bell.zzz")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(sending)
-            }
-
-            if let msg = vm.actionMessage {
-                Text(msg).font(.footnote).foregroundStyle(.secondary)
-            }
+    @ViewBuilder private var filterPicker: some View {
+        Picker("在线状态", selection: $filter) {
+            ForEach(StatusFilter.allCases) { f in Text(f.rawValue).tag(f) }
         }
-        .padding(.vertical, 2)
+        .pickerStyle(.segmented)
     }
 
     @ViewBuilder private var knownSection: some View {
         if showKnown {
-            if vm.knownDevices.isEmpty {
-                Text("暂无登记设备").font(.callout).foregroundStyle(.secondary)
+            if filteredDevices.isEmpty {
+                Text(vm.knownDevices.isEmpty ? "暂无登记设备" : "当前过滤条件下无设备")
+                    .font(.callout).foregroundStyle(.secondary)
             } else {
-                ForEach(vm.knownDevices) { d in
+                ForEach(filteredDevices) { d in
                     NavigationLink(value: d) {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {

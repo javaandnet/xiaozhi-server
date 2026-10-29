@@ -110,6 +110,12 @@ function tokenUser(cfg, req) {
   } catch (e) { return null; }
 }
 
+/** Console session check for non-/firmware mounts (peer camera relay). */
+export function consoleSessionUser(cfg, req) {
+  if (!authEnabled(cfg)) return 'anonymous';
+  return tokenUser(cfg, req);
+}
+
 /**
  * Auth middleware for the /firmware console (mounted before static/api).
  * Open access only when no manage.password is set AND no user store exists.
@@ -181,13 +187,15 @@ export function createStudioRouter(cfg, hooks = {}) {
     // Cookie Path must match the external namespace the browser is browsing (/xiaozhi on cloud)
     loginFails.delete(ip); // successful login clears the failure window
     const pre = String(req.originalUrl || '').startsWith('/xiaozhi') ? '/xiaozhi' : '';
-    res.setHeader('Set-Cookie', `xzmanage=${makeToken(cfg, username)}; Path=${pre}/firmware; HttpOnly; SameSite=Lax; Max-Age=604800`);
+    // Cookie Path is the namespace root so the session reaches both /firmware
+    // and the public relay /api/homekit on the cloud hub (guard reads xzmanage).
+    res.setHeader('Set-Cookie', `xzmanage=${makeToken(cfg, username)}; Path=${pre}/; HttpOnly; SameSite=Lax; Max-Age=604800`);
     console.log(`[StudioAuth] login ok for "${username}" from ${ip}`);
     res.json({ ok: true, username });
   });
   router.post('/logout', (req, res) => {
     const pre = String(req.originalUrl || '').startsWith('/xiaozhi') ? '/xiaozhi' : '';
-    res.setHeader('Set-Cookie', `xzmanage=; Path=${pre}/firmware; HttpOnly; Max-Age=0`);
+    res.setHeader('Set-Cookie', `xzmanage=; Path=${pre}/; HttpOnly; Max-Age=0`);
     res.json({ ok: true });
   });
 

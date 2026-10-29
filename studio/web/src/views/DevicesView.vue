@@ -4,6 +4,7 @@ import { disconnect, wake } from '@/api/voice';
 import { useRobotStatus } from '@/composables/useRobotStatus';
 import { useRefreshBus } from '@/composables/useRefreshBus';
 import { useKnownDevices, useLiveDevices } from '@/composables/useDevices';
+import { getHealth } from '@/api/device';
 import { confirmAction, useApi } from '@/composables/useApi';
 import KnownDevicesTable from '@/components/devices/KnownDevicesTable.vue';
 import LiveDevicesTable from '@/components/devices/LiveDevicesTable.vue';
@@ -38,6 +39,15 @@ const { state: robotStatus, robotReadyNames, load: loadRobotStatus } = useRobotS
 const { register, unregister } = useRefreshBus();
 const { loading: bulkWaking, run } = useApi();
 
+// 家云互联链路状态（hub 侧显示家里分支在线/离线；branch 侧显示本机）
+const peer = ref(null);
+async function loadPeer() {
+  try {
+    const h = await getHealth();
+    peer.value = h?.peer || null;
+  } catch { peer.value = null; }
+}
+
 const audioRef = ref(null);
 const practiceRef = ref(null);
 const profileRef = ref(null);
@@ -47,7 +57,7 @@ const convsRef = ref(null);
 const detailRef = ref(null);
 
 async function reload() {
-  await Promise.all([loadKnown(), loadLive()]);
+  await Promise.all([loadKnown(), loadLive(), loadPeer()]);
 }
 
 async function bulkWake() {
@@ -116,6 +126,9 @@ onBeforeUnmount(() => {
     <el-tab-pane label="注册设备（持久化）" name="known">
       <div class="row">
         <el-button class="op-btn" size="small" :loading="knownLoading" @click="reload">⟳ 刷新</el-button>
+        <el-tag v-if="peer && peer.role === 'hub'" size="small" :type="peer.branch_online ? 'success' : 'danger'">
+          互联：家里{{ peer.branch_online ? '在线' : '离线' }}
+        </el-tag>
         <el-input
           v-model="filterKnown"
           size="small"
@@ -155,6 +168,7 @@ onBeforeUnmount(() => {
       <KnownDevicesTable
         :rows="filteredKnown"
         @select="(r) => (knownSel = r)"
+        @speak="broadcastToRow"
         @command="(p) => commandRef.open(p)"
         @settings="(id) => profileRef.open(id)"
         @convs="(id) => convsRef.open(id)"

@@ -12,7 +12,7 @@ const menus = [
   { index: 'overview', label: '📊 总览' },
   { index: 'devices', label: '📱 设备管理' },
   { index: 'firmware', label: '🔧 固件工作台' },
-  { index: 'masterpi', label: '🤖 MasterPi 连接' },
+  { index: 'masterpi', label: '🤖 MasterPi 遥控' },
   { index: 'home', label: '🏠 家庭设备' },
   { index: 'interfaces', label: '🔌 接口管理' },
 ];

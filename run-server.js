@@ -11,7 +11,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
-import { createStudioRouter, createManageAuth } from './studio/routes.js';
+import crypto from 'crypto';
+import { createStudioRouter, createManageAuth, consoleSessionUser } from './studio/routes.js';
 import { studioConfig } from './studio/config.js';
 import { streamStart, streamStop, streamStatus, facesList } from './studio/lib/masterpi.js';
 
@@ -40,6 +41,20 @@ async function main() {
     // Console login: config.json manage.password (empty = open access, local default)
     studioConfig.managePassword = (config.manage && config.manage.password) || process.env.XIAOZHI_MANAGE_PASSWORD || '';
     channel.app.use('/firmware', createManageAuth(studioConfig));
+
+    // Cloud-edge auth gate for the public /api/homekit relay (hub role only; no-op on branch).
+    // Primary: studio console session cookie (browser, same-origin). Compat: X-Xiaozhi-Key ==
+    // voiceFlow.token so the native iOS app keeps working until it gains a login flow.
+    const keyOk = (a, b) => {
+      if (!a || !b) return false;
+      const x = Buffer.from(String(a)); const y = Buffer.from(String(b));
+      return x.length === y.length && crypto.timingSafeEqual(x, y);
+    };
+    channel.homekitGuard = (req) => {
+      if (consoleSessionUser(studioConfig, req)) return true;
+      const got = req.headers['x-xiaozhi-key'] || (req.body && req.body.token) || '';
+      return keyOk(got, channel.config && channel.config.voiceFlow && channel.config.voiceFlow.token);
+    };
 
     // Login page: the built Element Plus console login (studio/web) when present,
     // otherwise the standalone legacy login.html.

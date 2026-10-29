@@ -1,15 +1,21 @@
 import SwiftUI
 
-/// 设备详情设定页：基础信息 + 能力设定（机器人硬件/身体绑定、智能家居、语言）。
+/// 设备详情设定页：基础信息 + 播报/命令/唤醒 + 能力设定（机器人硬件/身体绑定、智能家居、语言）。
 /// 读写 GET/POST /api/settings/device；后端字段级合并（robot 只回传 enabled/body，actions/maxFunctions 保持原值）。
+/// 播报/命令/唤醒仅对在线设备开放（vm 轮询保持状态实时）。
 struct DeviceDetailView: View {
     let device: XZKnownDevice
+    @ObservedObject var vm: DevicesViewModel
 
     // 设定状态
     @State private var loaded = false
     @State private var isLoading = false
     @State private var saving = false
     @State private var message: String?
+
+    // 播报/命令状态
+    @State private var text: String = ""
+    @State private var sending = false
 
     @State private var robotEnabled = false
     @State private var robotBody = ""          // "" = 未绑定（回退全局）
@@ -19,9 +25,16 @@ struct DeviceDetailView: View {
     // 可绑定的机器人身体（device-MCP provider）
     @State private var bodies: [XZMcpProvider] = []
 
+    /// 实时在线状态：从 vm 轮询列表取最新行，回落到进入时的快照
+    private var liveDevice: XZKnownDevice {
+        vm.knownDevices.first { $0.keyId == device.keyId } ?? device
+    }
+    private var isOnline: Bool { liveDevice.isOnline }
+
     var body: some View {
         List {
             infoSection
+            controlSection
             capabilitySection
             languageSection
             if let message {
@@ -43,7 +56,7 @@ struct DeviceDetailView: View {
     private var infoSection: some View {
         Section {
             infoRow("状态") {
-                StatusBadge(kind: device.isOnline ? .online : (device.isResting ? .resting : .offline))
+                StatusBadge(kind: isOnline ? .online : (liveDevice.isResting ? .resting : .offline))
             }
             infoRow("Device ID", value: device.device_id ?? "-")
             if let mac = device.mac, !mac.isEmpty { infoRow("MAC", value: mac) }
@@ -64,6 +77,84 @@ struct DeviceDetailView: View {
             } else {
                 content()
             }
+        }
+    }
+
+    // MARK: - 播报 / 命令 / 唤醒（仅在线设备可用）
+
+    private var controlSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                TextEditor(text: $text)
+                    .frame(minHeight: 72)
+                    .font(.body)
+                    .disabled(!isOnline)
+                    .overlay(alignment: .topLeading) {
+                        if text.isEmpty {
+                            Text(isOnline ? "要播报给它的文字 / 自然语言命令…" : "设备离线，无法发送信息")
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 8).padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                    }
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task {
+                            sending = true
+                            await vm.broadcast(text: text, deviceId: device.keyId)
+                            sending = false
+                        }
+                    } label: {
+                        Label(sending ? "发送中…" : "播报", systemImage: "speaker.wave.2.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
+                    .disabled(!isOnline || sending || text.trimmed.isEmpty)
+
+                    Button {
+                        Task {
+                            sending = true
+                            await vm.command(text: text, deviceId: device.keyId)
+                            sending = false
+                        }
+                    } label: {
+                        Label("命令", systemImage: "text.bubble.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
+                    .disabled(!isOnline || sending || text.trimmed.isEmpty)
+
+                    Button {
+                        Task {
+                            sending = true
+                            await vm.wake(deviceId: device.keyId)
+                            sending = false
+                        }
+                    } label: {
+                        Label("唤醒", systemImage: "bell.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.large)
+                    .disabled(!isOnline || sending)
+                }
+
+                if let msg = vm.actionMessage {
+                    Text(msg).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 2)
+        } header: { Text("播报 / 命令 / 唤醒") } footer: {
+            Text(isOnline
+                 ? "命令相当于对它说话（设备处理后语音回复）；唤醒用于退出休息模式并提示它听。"
+                 : "设备当前离线，仅可查看/修改设定；上线后即可发送信息。")
+                .font(.footnote)
         }
     }
 

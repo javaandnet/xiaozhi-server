@@ -20,7 +20,8 @@ function open({ mode = 'new', targetId = null, name = '' } = {}) {
   wizard.result = '';
   wizard.name = name || (mode === 'append' ? '' : defaultName());
   visible.value = true;
-  if (!mpStream.running) startStream();
+  // 登记依赖检测框:强制 face 档启动(后端对已运行的流会热切模式)
+  startStream('face');
 }
 
 async function startCapture() {
@@ -97,10 +98,10 @@ defineExpose({ open });
         摄像头预览未启动（若一直空白，点下方“启动预览画面”）
       </div>
       <div class="row" style="justify-content: center; margin-top: 8px">
-        <el-button v-if="!mpStream.running" size="small" type="primary" :loading="mpStream.loading" @click="startStream">
+        <el-button v-if="!mpStream.running" size="small" type="primary" :loading="mpStream.loading" @click="startStream('face')">
           ▶ 启动预览画面
         </el-button>
-        <el-button v-else size="small" text @click="startStream">⟳ 刷新画面</el-button>
+        <el-button v-else size="small" text @click="startStream('face')">⟳ 刷新画面</el-button>
       </div>
     </div>
 

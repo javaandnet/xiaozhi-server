@@ -17,6 +17,21 @@ export function registerDeviceRoutes(app, ctx) {
     res.json({ ok: true, items: getActionCatalog() });
   });
 
+  // 跨实例 face_found 接收端（改动三）：身体注册在云端时，hub 将感知事件经 peer 通道
+  // 转发到实际持有语音设备的家侧，由此本地解析 settings.robot.body 并放送。
+  app.post('/api/robot/face-found', async (req, res) => {
+    const { bodyKey, person, personId } = req.body || {};
+    if (!bodyKey) return res.status(400).json({ ok: false, error: 'bodyKey 必填' });
+    const handler = ctx.webSocketHandler;
+    if (!handler || typeof handler._dispatchFaceFound !== 'function') {
+      return res.status(500).json({ ok: false, error: 'WebSocket handler 未初始化' });
+    }
+    try {
+      const r = await handler._dispatchFaceFound(bodyKey, person, personId);
+      res.json({ ok: true, ...(r || {}) });
+    } catch (e) { res.json({ ok: false, error: e.message }); }
+  });
+
   app.get('/api/settings/device', (req, res) => {
     const deviceId = String(req.query.deviceId || '');
     if (!deviceId) return res.status(400).json({ ok: false, error: 'deviceId 必填' });
@@ -205,7 +220,7 @@ export function registerDeviceRoutes(app, ctx) {
 
   // 模式切换触发词（前台自由定义）：config.json → modeKeywords。
   // 识别文本去标点后与短语全等即命中；保存即热生效（匹配处实时读 config）。
-  const MODE_KW_KEYS = ['employeeOn', 'employeeOff', 'restOn', 'restOff', 'practiceOn', 'practiceOff', 'practiceEndManual', 'practiceEndAuto'];
+  const MODE_KW_KEYS = ['employeeOn', 'employeeOff', 'restOn', 'restOff', 'practiceOn', 'practiceOff', 'practiceEndManual', 'practiceEndAuto', 'intercomOn', 'intercomOff', 'intercomCall'];
   app.get('/api/settings/mode-keywords', (_req, res) => {
     const kw = ctx.config?.modeKeywords || {};
     res.json({ ok: true, modeKeywords: Object.fromEntries(MODE_KW_KEYS.map((k) => [k, Array.isArray(kw[k]) ? kw[k] : []])) });
@@ -233,6 +248,29 @@ export function registerDeviceRoutes(app, ctx) {
       channelLogger.warn(`config.json 持久化失败: ${e.message}`);
     }
     res.json({ ok: true, modeKeywords: clean, persisted });
+  });
+
+  // 对讲机模式（双设备原声透传，PTT 半双工）：服务器侧远程开/关指定设备的对讲模式。
+  // POST { deviceId, on: true|false, peer? }：peer 可为人设名/deviceId/clientId（进入时解析）；
+  // 不带 peer 则用该机 settings.intercom.peer。开关均热生效不落 config。
+  app.post('/api/settings/intercom', async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.on !== 'boolean') return res.status(400).json({ ok: false, error: 'on 须为 true/false' });
+    if (!ctx.webSocketHandler || !ctx.webSocketHandler.intercomService) {
+      return res.status(500).json({ ok: false, error: 'WebSocket 处理器未就绪' });
+    }
+    if (b.on && ctx.config.intercom && ctx.config.intercom.enabled === false) {
+      return res.status(400).json({ ok: false, error: '对讲功能已被 config.intercom.enabled=false 关闭' });
+    }
+    try {
+      const r = await ctx.webSocketHandler.applyIntercomMode(b.deviceId || null, b.on, b.peer ? String(b.peer) : null);
+      if (b.on && r.applied === 0) {
+        return res.status(400).json({ ok: false, error: r.error || '未找到在线设备或对讲对端解析失败', ...r });
+      }
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
   });
 
   // 口语练习模式配置：读取 + 热更新 + 持久化 config.json → practice
@@ -353,8 +391,42 @@ export function registerDeviceRoutes(app, ctx) {
     }
   });
 
+  // 对端实例实时在线清单（家云合并视图）：hub 经 dispatch，branch 直连 hub。
+  // 韧性：拉取成功（含空数组=对端真实无在线）才刷新缓存并记为「最近成功值」；
+  // 拉取失败（重启/网络抖动）不退化成空口径，而是沿用最近成功值（60s 宽限期），
+  // 避免本机 branch 无本地语音连接时，把已开机、实际连在云端的设备误显示为离线。
+  const PEER_LIVE_TTL = 10000; // 正常缓存
+  const PEER_LIVE_RETRY = 3000; // 命中失败兜底后短缓存，尽快重试
+  const PEER_LIVE_GRACE = 60000; // 失败时可沿用最近成功值的上限
+  async function peerLiveIds() {
+    const link = ctx.peerLink;
+    if (!link || (!link.isHub && !link.isBranch)) return [];
+    const cache = ctx._peerLiveCache;
+    if (cache && Date.now() - cache.at < (cache.stale ? PEER_LIVE_RETRY : PEER_LIVE_TTL)) return cache.ids;
+    let ids = null; // null = 本次拉取失败（与「成功但为空」严格区分）
+    try {
+      const r = link.isHub
+        ? (link.branchOnline() ? await link.dispatch('GET', '/api/devices', null, 8000) : { error: 'branch offline' })
+        : await link.callHub('GET', '/api/devices', null, 8000);
+      const list = r && !r.error ? r.body : null;
+      if (Array.isArray(list)) ids = list.map((d) => String(d.deviceId || '').toLowerCase()).filter(Boolean);
+    } catch (e) {
+      console.warn(`[xiaozhi] peer live devices fetch failed: ${e.message}`);
+    }
+    if (Array.isArray(ids)) {
+      ctx._peerLiveCache = { at: Date.now(), ids, stale: false };
+      ctx._peerLiveLastGood = { at: Date.now(), ids };
+      return ids;
+    }
+    // 拉取失败：宽限期内沿用最近一次成功值，超期才退化为空
+    const good = ctx._peerLiveLastGood;
+    const serveIds = good && (Date.now() - good.at < PEER_LIVE_GRACE) ? good.ids : [];
+    ctx._peerLiveCache = { at: Date.now(), ids: serveIds, stale: true };
+    return serveIds;
+  }
+
   // 已知设备列表（含离线，来自持久化设备注册表）
-  app.get('/api/devices/known', (req, res) => {
+  app.get('/api/devices/known', async (req, res) => {
     const store = ctx.ensureStore();
     const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
     const offset = parseInt(req.query.offset, 10) || 0;
@@ -370,6 +442,8 @@ export function registerDeviceRoutes(app, ctx) {
     const liveIds = new Set(
       liveDevices.map((d) => String(d.deviceId).toLowerCase())
     );
+    // 合并对端实例在线：设备在家/云间漂移时两边走私看到的都是全局真值
+    for (const id of await peerLiveIds()) liveIds.add(id);
     for (const it of result.items || []) {
       const keys = [String(it.mac || '').toLowerCase(), ...(it.device_ids || []).map((x) => String(x).toLowerCase())];
       it.online = keys.some((k) => k && liveIds.has(k)) ? 1 : 0;

@@ -29,6 +29,7 @@ import VadService from './core/services/vad.js';
 import VoiceprintService from './core/services/voiceprint.js';
 import McpService from './core/services/mcp.js';
 import HomeKitService from './core/services/homekit.js';
+import PeerLink from './core/services/peerLink.js';
 import { registerApiRoutes } from './core/routes/index.js';
 
 // standalone：不再依赖 gala 主进程与消息总线；LLM 走 bridge（config.llm.provider=openai/dsh）
@@ -67,6 +68,9 @@ export class XiaozhiChannel extends EventEmitter {
     this.app = null;
     this.server = null;
     this.wss = null;
+    // Cloud-edge auth gate for public /api/homekit relay (injected by run-server when role=hub).
+    // Null on branch / legacy mounts -> homekit routes keep their LAN-trusted open behavior.
+    this.homekitGuard = null;
 
     // xiaozhi 核心服务
     this.deviceManager = null;
@@ -140,11 +144,24 @@ export class XiaozhiChannel extends EventEmitter {
       // 初始化WebSocket处理器
       this.initializeWebSocketHandler();
 
+      // 家云实例互联（peer link）：hub 提供 /api/peer/* 端点，branch 起长轮询循环
+      // （先于路由注册实例化：registerPeerRoutes 在注册期读取 ctx.peerLink）
+      this.peerLink = new PeerLink(this.config.peer || {}, { port: this.port });
+
+      // Cross-instance robot-body wiring: hub reads its own providers for the poll snapshot;
+      // both mcpService and the WS handler use peerLink for branch->hub reverse calls and face_found relay.
+      if (this.peerLink.isHub) this.peerLink.setMcpService(this.mcpService);
+      if (this.mcpService && typeof this.mcpService.setPeerLink === 'function') this.mcpService.setPeerLink(this.peerLink);
+      if (this.webSocketHandler) this.webSocketHandler.peerLink = this.peerLink;
+
       // 创建Express应用和HTTP服务器
       this.setupExpressServer();
 
       // 启动服务器
       await this.startServer();
+
+      if (this.peerLink.isBranch) this.peerLink.start();
+      else if (this.peerLink.isHub) console.log('[PeerLink] hub endpoints ready, waiting for branch');
 
       // 注册到消息总线
       this.registerWithBus();
@@ -182,6 +199,9 @@ export class XiaozhiChannel extends EventEmitter {
       if (this.webSocketHandler) {
         this.webSocketHandler.stopHeartbeat();
       }
+
+      // 停止家云互联链路
+      if (this.peerLink) this.peerLink.stop();
 
       // 停止WebSocket服务器
       if (this.wss) {
@@ -402,6 +422,7 @@ export class XiaozhiChannel extends EventEmitter {
         channel: CHANNEL_ID,
         // devices = 在线连接数：deviceManager.devices 是 Map，Object.keys(Map) 恒为 []
         devices: this.deviceManager ? this.deviceManager.getOnlineDevices().length : 0,
+        peer: this.peerLink ? this.peerLink.status() : null,
         uptime: process.uptime()
       });
     });
@@ -418,6 +439,8 @@ export class XiaozhiChannel extends EventEmitter {
       get webSocketHandler() { return self.webSocketHandler; },
       get mcpService() { return self.mcpService; },
       get homekitService() { return self.homekitService; },
+      get peerLink() { return self.peerLink; },
+      get homekitGuard() { return self.homekitGuard; },
       get otaHandler() { return self.otaHandler; },
       get llmService() { return self.llmService; },
       get ttsService() { return self.ttsService; },

@@ -1,6 +1,7 @@
 import os from 'os';
 import BaseService from './base.js';
 import { getConfig } from '../../config/loader.js';
+import { noteToolResult as ikJogNoteToolResult } from './ikJog.js';
 
 /**
  * MCP工具定义
@@ -196,6 +197,40 @@ class McpService extends BaseService {
   }
 
   /**
+   * 注入 peer link（家云实例互联）。branch 侧据此读取由 long-poll 回灌的
+   * 云端 provider 工具快照，实现「语音/控制台在本实例、身体注册在云端」的跨实例调用。
+   */
+  setPeerLink(peerLink) {
+    this.peerLink = peerLink;
+  }
+
+  /** 云端回灌的机器人 provider 快照（branch 侧）；无则空数组 */
+  _remoteProviders() {
+    return (this.peerLink && typeof this.peerLink.getRemoteProviders === 'function')
+      ? (this.peerLink.getRemoteProviders() || [])
+      : [];
+  }
+
+  /** 按稳定标识（deviceId/mac/clientId，大小写不敏感）在远端快照里定位身体条目 */
+  _remoteProviderEntry(key) {
+    if (!key) return null;
+    const k = String(key).toLowerCase();
+    return this._remoteProviders().find((p) =>
+      [p.deviceId, p.mac, p.clientId].some((v) => v && String(v).toLowerCase() === k)) || null;
+  }
+
+  /** 本实例是否存在该 provider 的活连接（ready）——本地优先/跨实例路由判断 */
+  hasLocalProvider(key) {
+    const mc = this._findDeviceClient(key);
+    return !!(mc && mc.isReady());
+  }
+
+  /** 该 provider 是否可达：本实例 ready 或云端快照在线（跨实例） */
+  hasProviderAnywhere(key) {
+    return this.hasLocalProvider(key) || !!this._remoteProviderEntry(key);
+  }
+
+  /**
    * 使缓存失效
    */
   invalidateCache() {
@@ -277,8 +312,12 @@ class McpService extends BaseService {
   }
 
   getFunctionDescriptionsForProvider(providerKey) {
+    // 本地优先：本实例有该 provider 的活连接则用本地工具；否则回退到云端回灌的
+    // 远端快照（branch 侧身体注册在云端时，语音/工具目录仍可注入 LLM）。
     const mc = this._findDeviceClient(providerKey);
-    return (mc && mc.isReady()) ? mc.getAvailableTools() : [];
+    if (mc && mc.isReady()) return mc.getAvailableTools();
+    const remote = this._remoteProviderEntry(providerKey);
+    return remote && Array.isArray(remote.tools) ? remote.tools : [];
   }
 
   /** 按工具类型取函数描述（OpenAI 格式），如 homekit 家居工具独立于机器人身体注入 */
@@ -624,6 +663,21 @@ class McpService extends BaseService {
    * 调用设备端MCP工具
    */
   async callDeviceMcpTool(connection, toolName, args = {}, timeout = 30, boundProviderKey = null) {
+    // 跨实例反向调用（改动三）：本实例为 branch 且绑定身体不在本实例（注册在云端），
+    // 但存在于云端回灌的 provider 快照时，反向 callHub 调云端 /api/mcp/call 并回传结果。
+    // hub 非 branch 不会再转发，无成环；沿用纯 JSON stub 连接（对硬件直连不走 TTS）。
+    if (boundProviderKey && this.peerLink && this.peerLink.isBranch
+        && !this.hasLocalProvider(boundProviderKey) && this.hasProviderAnywhere(boundProviderKey)) {
+      const r = await this.peerLink.callHub('POST', '/api/mcp/call',
+        { device: boundProviderKey, tool: toolName, args: args || {} }, (timeout + 5) * 1000);
+      if (!r.error) {
+        const b = r.body || {};
+        if (b.ok) return b.result == null ? null : String(b.result);
+        throw new Error(b.error || `云端身体调用失败: ${toolName}`);
+      }
+      console.warn(`[MCP] branch reverse call to hub failed (${toolName}): ${r.error}`);
+      throw new Error(`云端身体反向调用失败: ${r.error}`);
+    }
     // 路由到“真正拥有该工具的设备”：优先当前会话设备，否则在所有在线设备中按 hasTool 查找。
     // 这样跨设备（如 ESP32 会话调用 MasterPi 的 robot.* 工具）才能正确下发。
     let mcpClient;
@@ -718,15 +772,23 @@ class McpService extends BaseService {
         }
 
         const content = rawResult.content;
+        let resultText = null;
         if (Array.isArray(content) && content.length > 0) {
           if (typeof content[0] === 'object' && 'text' in content[0]) {
-            return content[0].text;
+            resultText = content[0].text;
           }
+        }
+        if (resultText !== null) {
+          // IK 微调基准统一：机械臂相关工具真实执行后推进/作废基准（仅按绑定身体归因）
+          ikJogNoteToolResult(toolName, toolArgs, resultText, boundProviderKey);
+          return resultText;
         }
       }
 
       // 如果结果不是预期的格式，将其转换为字符串
-      return String(rawResult);
+      const fallbackText = String(rawResult);
+      ikJogNoteToolResult(toolName, toolArgs, fallbackText, boundProviderKey);
+      return fallbackText;
 
     } catch (error) {
       mcpClient.cleanupCallResult(toolCallId);
@@ -736,7 +798,11 @@ class McpService extends BaseService {
         const cid = (mcpClient.connection && mcpClient.connection.clientId) || null;
         if (cid) {
           console.warn(`⚠️ 工具调用超时，判定连接为僵尸并清理: ${cid}`);
+          const conn = mcpClient.connection;
           this.handleDeviceDisconnect(cid);
+          // 必须同时关掉底层 socket：设备侧 ws 无 ping 超时，只删服务端条目
+          // 对端无感知，会拿着半开连接永等不到重连，身体长期离线
+          try { conn.close(1011, 'mcp call timeout, zombie connection'); } catch { /* already closed */ }
         }
       }
       throw error;
@@ -852,13 +918,25 @@ class HomeKitExecutor extends ToolExecutor {
   constructor(homekitService) {
     super();
     this.homekitService = homekitService;
+    // toolName -> { key, accessoryId }：灯具键只在配件内唯一，同名冲突时工具名加配件后缀，
+    // 执行时按本映射回推目标灯，避免跨配件误控。
+    this.toolTargets = new Map();
   }
 
   getTools() {
     const tools = {};
+    this.toolTargets = new Map();
     if (!this.homekitService || !this.homekitService.enabled) return tools;
     for (const light of this.homekitService.getLights()) {
-      const toolName = this.homekitService.toolNameForLight(light.key);
+      let toolName = this.homekitService.toolNameForLight(light.key);
+      if (tools[toolName]) {
+        // 跨配件键冲突：用配件标识（MAC 去分隔符）生成唯一工具名
+        const token = String(light.accessoryId || '').toLowerCase().replace(/[^0-9a-z]/g, '').slice(-8);
+        toolName = `${this.homekitService.toolNameForLight(light.key)}_${token}`;
+        console.warn(`[HomeKit] duplicate light key ${light.key}, tool renamed to ${toolName}`);
+        if (tools[toolName]) continue;
+      }
+      this.toolTargets.set(toolName, { key: light.key, accessoryId: light.accessoryId });
       const properties = {
         power: { type: 'boolean', description: '开(true)/关(false)灯' },
         brightness: { type: 'integer', minimum: 0, maximum: 100, description: '亮度百分比 0-100' }
@@ -880,13 +958,13 @@ class HomeKitExecutor extends ToolExecutor {
   }
 
   hasTool(toolName) {
-    return this.homekitService.lightKeyFromTool(toolName) != null && this.homekitService.lights.size > 0;
+    return this.toolTargets.has(toolName) || (this.homekitService.lightKeyFromTool(toolName) != null && this.homekitService.getLights().length > 0);
   }
 
   async execute(connection, toolName, args) {
     try {
-      const lightKey = this.homekitService.lightKeyFromTool(toolName);
-      const text = await this.homekitService.applyControl(lightKey, args);
+      const target = this.toolTargets.get(toolName) || { key: this.homekitService.lightKeyFromTool(toolName), accessoryId: null };
+      const text = await this.homekitService.applyControl(target.key, args, target.accessoryId);
       return new ActionResponse(Action.REQLLM, null, text);
     } catch (error) {
       return new ActionResponse(Action.ERROR, error.message);

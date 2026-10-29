@@ -76,9 +76,9 @@ export const REST_STATUS_OVERRIDES = {
 };
 
 export const MODE_LABELS = {
-  zh: { dev: '开发', chat: '聊天', employee: '员工', rest: '休息', practice: '口语' },
-  ja: { dev: '開発', chat: 'チャット', employee: 'スタッフ', rest: '休憩', practice: 'スピーチ' },
-  en: { dev: 'Dev', chat: 'Chat', employee: 'Staff', rest: 'Rest', practice: 'Practice' }
+  zh: { dev: '开发', chat: '聊天', employee: '员工', rest: '休息', practice: '口语', intercom: '对讲' },
+  ja: { dev: '開発', chat: 'チャット', employee: 'スタッフ', rest: '休憩', practice: 'スピーチ', intercom: '通話' },
+  en: { dev: 'Dev', chat: 'Chat', employee: 'Staff', rest: 'Rest', practice: 'Practice', intercom: 'Intercom' }
 };
 
 export const FIXED_TEXTS = {
@@ -93,7 +93,14 @@ export const FIXED_TEXTS = {
     practiceExit: '已退出口语练习模式，回到普通聊天',
     practiceEndManual: '已切换为手动结束：讲完请按按钮收卷',
     practiceEndAuto: '已切换为自动结束：我会判断你是否说完',
-    practiceNone: '没有听到讲述内容'
+    practiceNone: '没有听到讲述内容',
+    intercomEnter: '已进入对讲模式，按住按键说话，松手发送给对方',
+    intercomConnected: '对讲已接通，按住按键即可回应对方的讲话',
+    intercomExit: '已退出对讲模式，回到普通聊天',
+    intercomNoPeer: '还没有设置对讲对象，请说呼叫加对方名字，或去服务器配置',
+    intercomPeerOffline: '对方当前不在线，稍后再试',
+    intercomBusy: '对方正在讲话，请等一下再按',
+    intercomDisabled: '对讲功能未开启，请在服务器配置开启'
   },
   ja: {
     welcome: 'こんにちは、小智です。何をお手伝いしましょうか？',
@@ -106,7 +113,14 @@ export const FIXED_TEXTS = {
     practiceExit: 'スピーチ練習モードを終了しました',
     practiceEndManual: '手動終了に切り替えました。話し終わったらボタンを押してください',
     practiceEndAuto: '自動終了に切り替えました。話し終わった私が判断します',
-    practiceNone: 'スピーチ内容が聞こえませんでした'
+    practiceNone: 'スピーチ内容が聞こえませんでした',
+    intercomEnter: 'インターホンモードに入りました。ボタンを押して話し、離すと相手に送信します',
+    intercomConnected: 'インターホン接続です。ボタンを押して話すことができます',
+    intercomExit: 'インターホンモードを終了しました',
+    intercomNoPeer: '相手の設定がありません。呼び名で呼ぶか、サーバーで設定してください',
+    intercomPeerOffline: '相手は現在オフラインです。あとでお試しください',
+    intercomBusy: '相手が送信中です。少し待ってからもう一度押してください',
+    intercomDisabled: 'インターホン機能は無効です。サーバー設定で有効にしてください'
   },
   en: {
     welcome: 'Hi, I am Xiaozhi. How can I help you?',
@@ -119,7 +133,14 @@ export const FIXED_TEXTS = {
     practiceExit: 'Left speaking practice mode, back to normal chat',
     practiceEndManual: 'Switched to manual end: press the button when you finish',
     practiceEndAuto: 'Switched to auto end: I will detect when you are done',
-    practiceNone: 'I did not hear any speech content'
+    practiceNone: 'I did not hear any speech content',
+    intercomEnter: 'Intercom mode is on. Hold the button to talk, release to send to the other side',
+    intercomConnected: 'Intercom connected. Hold the button to talk back',
+    intercomExit: 'Left intercom mode, back to normal chat',
+    intercomNoPeer: 'No intercom peer set. Call the peer by name, or configure it on the server',
+    intercomPeerOffline: 'The peer is offline right now, please try later',
+    intercomBusy: 'The peer is talking, please wait and press again',
+    intercomDisabled: 'Intercom feature is disabled, enable it in server config'
   }
 };
 

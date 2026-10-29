@@ -15,4 +15,4 @@ export const pairHomeKit = (pin, deviceName) => apiPost('/api/homekit/pair', { p
 
 export const controlHomeKit = (light, args) => apiPost('/api/homekit/control', { light, ...args });
 
-export const renameHomeKit = (light, name) => apiPost('/api/homekit/rename', { light, name });
+export const renameHomeKit = (light, name, accessoryId) => apiPost('/api/homekit/rename', { light, name, accessoryId });

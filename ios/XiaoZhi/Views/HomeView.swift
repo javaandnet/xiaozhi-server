@@ -37,8 +37,13 @@ struct HomeView: View {
                     if vm.lights.isEmpty {
                         Text("尚未发现可控灯具，先在下方扫描/配对").foregroundStyle(.secondary)
                     } else {
-                        ForEach(vm.lights) { light in
-                            LightRow(vm: vm, light: light)
+                        ForEach(vm.accessoryGroups, id: \.id) { group in
+                            if vm.accessoryGroups.count > 1 {
+                                Text(group.name).font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(group.lights) { light in
+                                LightRow(vm: vm, light: light)
+                            }
                         }
                     }
                 } header: { Text("灯具控制") }
@@ -140,7 +145,7 @@ private struct LightRow: View {
                     get: { power },
                     set: { on in
                         power = on
-                        Task { await vm.control(lightKey: light.key ?? "", power: on) }
+                        Task { await vm.control(lightKey: light.key ?? "", accessoryId: light.accessoryId, power: on) }
                     }
                 ))
                 .labelsHidden()
@@ -149,7 +154,7 @@ private struct LightRow: View {
                 HStack {
                     Text("亮度").font(.caption).foregroundStyle(.secondary)
                     Slider(value: $brightness, in: 0...100) { editing in
-                        if !editing { Task { await vm.control(lightKey: light.key ?? "", brightness: Int(brightness)) } }
+                        if !editing { Task { await vm.control(lightKey: light.key ?? "", accessoryId: light.accessoryId, brightness: Int(brightness)) } }
                     }
                     Text("\(Int(brightness))").font(.caption2).frame(width: 34, alignment: .trailing)
                 }
@@ -158,7 +163,7 @@ private struct LightRow: View {
                 HStack {
                     Text("色温").font(.caption).foregroundStyle(.secondary)
                     Slider(value: $colorTemp, in: 0...100) { editing in
-                        if !editing { Task { await vm.control(lightKey: light.key ?? "", colorTemp: Int(colorTemp)) } }
+                        if !editing { Task { await vm.control(lightKey: light.key ?? "", accessoryId: light.accessoryId, colorTemp: Int(colorTemp)) } }
                     }
                     Text("\(Int(colorTemp))").font(.caption2).frame(width: 34, alignment: .trailing)
                 }
@@ -168,7 +173,7 @@ private struct LightRow: View {
         .alert("重命名灯具", isPresented: $showRename) {
             TextField("新的名称", text: $newName)
             Button("保存") {
-                Task { await vm.rename(lightKey: light.key ?? "", name: newName) }
+                Task { await vm.rename(lightKey: light.key ?? "", accessoryId: light.accessoryId, name: newName) }
             }
             Button("取消", role: .cancel) {}
         } message: {

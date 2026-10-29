@@ -23,7 +23,7 @@ function validateWs(label, v) {
   return s;
 }
 
-function target(cfg) {
+export function target(cfg) {
   const m = cfg.masterpi || (cfg.firmware && cfg.firmware.masterpi) || {};
   return {
     host: m.host || '192.168.1.91',
@@ -38,7 +38,17 @@ function target(cfg) {
 }
 
 // Run a remote command on the Pi through pish.sh; returns {ok, stdout, stderr, code}
+// pish.sh multiplexes over a shared ControlPath socket, so repeated calls reuse
+// one connection. ssh returns 255 only for transport-level failures (unreachable,
+// broken/stale master, connection reset) — not for a legitimate non-zero remote
+// exit — so that is the sole case worth a single retry (recovers a dead mux).
 function runPi(t, remoteCmd, timeoutMs = 25000) {
+  let r = piAttempt(t, remoteCmd, timeoutMs);
+  if (r.code === 255) r = { ...piAttempt(t, remoteCmd, timeoutMs), retried: true };
+  return r;
+}
+
+function piAttempt(t, remoteCmd, timeoutMs) {
   const r = spawnSync('bash', [PISH, 'run', remoteCmd], {
     env: { ...process.env, PI_HOST: t.host, PI_USER: t.user },
     encoding: 'utf8',
@@ -78,6 +88,30 @@ export function getServiceStatus(cfg) {
   const r = runPi(t, `systemctl is-active ${t.clientService} 2>/dev/null; systemctl is-enabled ${t.clientService} 2>/dev/null`, 12000);
   const lines = (r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
   return { active: lines[0] || 'unknown', enabled: lines[1] || 'unknown' };
+}
+
+// Remote-restart the device-MCP client service on the Pi (zombie-session recovery:
+// after a server restart the Pi may hold a half-dead TCP that never re-registers).
+export function restartClient(cfg) {
+  const t = target(cfg);
+  const r = runPi(t, `sudo systemctl restart ${t.clientService} && sleep 2 && systemctl is-active ${t.clientService}`, 45000);
+  const active = (r.stdout || '').trim();
+  return r.ok
+    ? { ok: true, active }
+    : { ok: false, active, error: r.stderr || r.stdout || 'restart failed' };
+}
+
+// Graceful power-off (shutdown -h): safer than pulling the plug — the Pi keeps
+// a face DB / event files on the SD card and hard cuts risk filesystem damage.
+// The command is backgrounded on the Pi so this SSH session returns cleanly
+// before the box goes down.
+export function shutdownPi(cfg) {
+  const t = target(cfg);
+  const r = runPi(t, 'nohup sudo -n shutdown -h now >/dev/null 2>&1 & echo SHUTDOWN_ARMED', 15000);
+  if (!r.ok || !/SHUTDOWN_ARMED/.test(r.stdout)) {
+    return { ok: false, error: r.stderr || r.stdout || 'shutdown command failed' };
+  }
+  return { ok: true, host: t.host };
 }
 
 // Patch server.primary/backup (+ optional deviceName) on the Pi; restart service when asked.
@@ -145,23 +179,76 @@ function streamInfo(t, running) {
   return { running, port: t.streamPort, url: `http://${t.host}:${t.streamPort}/` };
 }
 
+// Read the live stream's /meta from the Pi (curl over SSH, JSON out).
+function streamMeta(t) {
+  const r = runPi(t, `curl -s -m 4 http://127.0.0.1:${t.streamPort}/meta 2>/dev/null`, 12000);
+  if (!r.ok || !r.stdout) return null;
+  try { return JSON.parse(r.stdout); } catch { return null; }
+}
+
 export function streamStatus(cfg) {
   const t = target(cfg);
   const r = runPi(t, `pgrep -f '[v]ision_stream' >/dev/null && echo RUN || echo STOP`, 12000);
-  return streamInfo(t, /RUN/.test(r.stdout || ''));
+  const running = /RUN/.test(r.stdout || '');
+  const meta = running ? streamMeta(t) : null;
+  // status passes through the stream's own health text: "ok" or e.g. "no frame (retrying)"
+  // when the camera handle is dead, so the UI can offer a manual reconnect.
+  return { ...streamInfo(t, running), mode: meta?.mode || '', faces: meta?.faces, changed: meta?.changed, status: meta?.status || '' };
 }
 
-export function streamStart(cfg) {
+const STREAM_MODES = ['face', 'preview', 'watch'];
+
+export function streamStart(cfg, mode) {
   const t = target(cfg);
+  const m = STREAM_MODES.includes(mode) ? mode : 'face';
   const chk = runPi(t, `pgrep -f '[v]ision_stream' >/dev/null && echo RUN || echo STOP`, 12000);
-  if (/RUN/.test(chk.stdout || '')) return { ok: true, already: true, ...streamInfo(t, true) };
-  const cmd = `cd ${t.streamDir} && test -f ${t.streamScript} && (setsid python3 ${t.streamScript} --port ${t.streamPort} >/tmp/vstream.log 2>&1 </dev/null & echo LAUNCH_OK) || echo NO_SCRIPT`;
+  if (/RUN/.test(chk.stdout || '')) {
+    // already up: honor the requested mode rather than ignoring it
+    runPi(t, `curl -s -m 4 -X POST "http://127.0.0.1:${t.streamPort}/mode?set=${m}" >/dev/null 2>&1`, 12000);
+    return { ok: true, already: true, mode: m, ...streamInfo(t, true) };
+  }
+  const cmd = `cd ${t.streamDir} && test -f ${t.streamScript} && (setsid python3 ${t.streamScript} --port ${t.streamPort} --mode ${m} >/tmp/vstream.log 2>&1 </dev/null & echo LAUNCH_OK) || echo NO_SCRIPT`;
   const r = runPi(t, cmd, 15000);
   if (/NO_SCRIPT/.test(r.stdout || '')) return { ok: false, error: `${t.streamScript} not found on ${t.host}:${t.streamDir}` };
   // give the worker a moment to open the camera, then confirm it stayed up
   const after = runPi(t, `sleep 2; pgrep -f '[v]ision_stream' >/dev/null && echo RUN || echo STOP`, 12000);
   const running = /RUN/.test(after.stdout || '');
-  return { ok: running, error: running ? null : (r.stderr || r.stdout || 'launch failed'), ...streamInfo(t, running) };
+  return { ok: running, mode: m, error: running ? null : (r.stderr || r.stdout || 'launch failed'), ...streamInfo(t, running) };
+}
+
+export function streamSetMode(cfg, mode) {
+  const t = target(cfg);
+  if (!STREAM_MODES.includes(mode)) return { ok: false, error: `mode must be one of ${STREAM_MODES.join('/')}` };
+  const up = runPi(t, `pgrep -f '[v]ision_stream' >/dev/null && echo RUN || echo STOP`, 12000);
+  if (!/RUN/.test(up.stdout || '')) return { ok: false, error: 'stream not running' };
+  const r = runPi(t, `curl -s -m 5 -X POST "http://127.0.0.1:${t.streamPort}/mode?set=${mode}" 2>/dev/null`, 12000);
+  let parsed = null;
+  try { parsed = JSON.parse(r.stdout); } catch { /* fall through */ }
+  if (!r.ok || !parsed) return { ok: false, error: r.stderr || 'mode set failed' };
+  return { ok: true, mode: parsed.mode || mode };
+}
+
+export function watchEvents(cfg, since = 0) {
+  const t = target(cfg);
+  const s = String(Number(since) || 0);
+  const r = runPi(t, `curl -s -m 5 "http://127.0.0.1:${t.streamPort}/watch/events?since=${s}" 2>/dev/null`, 12000);
+  if (!r.ok || !r.stdout) return { ok: false, error: r.stderr || 'no data', events: [] };
+  try {
+    const ev = JSON.parse(r.stdout);
+    return { ok: true, events: Array.isArray(ev) ? ev : [] };
+  } catch (e) { return { ok: false, error: `bad json: ${e.message}`, events: [] }; }
+}
+
+// Snapshot bytes come back over an utf8 channel, so fetch base64 on the Pi and decode here.
+export function watchShot(cfg, name) {
+  const t = target(cfg);
+  const safe = String(name || '').replace(/[^0-9A-Za-z_.]/g, '');
+  if (!safe) return { ok: false, error: 'bad shot name' };
+  const r = runPi(t, `curl -s -m 8 "http://127.0.0.1:${t.streamPort}/watch/shot?name=${encodeURIComponent(safe)}" 2>/dev/null | base64 -w0`, 15000);
+  if (!r.ok || !r.stdout) return { ok: false, error: r.stderr || 'shot not found' };
+  const buf = Buffer.from(r.stdout.trim(), 'base64');
+  if (!buf.length || buf[0] !== 0xff) return { ok: false, error: 'not a jpeg' };
+  return { ok: true, jpeg: buf };
 }
 
 export function streamStop(cfg) {
@@ -170,6 +257,50 @@ export function streamStop(cfg) {
   const after = runPi(t, `pgrep -f '[v]ision_stream' >/dev/null && echo RUN || echo STOP`, 12000);
   const running = /RUN/.test(after.stdout || '');
   return { ok: !running, ...streamInfo(t, running) };
+}
+
+// ---- Robot safety switch (robot.allowChassis in the Pi's local config.json) ----
+// robot.py reads it once at startup and hard-refuses drive() unless true, so a
+// write must restart masterpi-client to take effect. Default is false (locked).
+export function getSafety(cfg) {
+  const t = target(cfg);
+  const r = runPi(t, `cat ${t.remoteConfig} 2>/dev/null`);
+  if (!r.ok || !r.stdout) return { ok: false, error: r.stderr || `cannot read ${t.remoteConfig} on ${t.host}` };
+  let j;
+  try { j = JSON.parse(r.stdout); } catch (e) { return { ok: false, error: `remote config is not valid JSON: ${e.message}` }; }
+  return { ok: true, allowChassis: !!(j.robot && j.robot.allowChassis === true) };
+}
+
+export function setSafety(cfg, allowChassis) {
+  const t = target(cfg);
+  const allow = allowChassis === true; // default-deny: anything but literal true locks
+  const py = [
+    'import json,os,shutil,tempfile',
+    `path=os.path.expanduser(${JSON.stringify(t.remoteConfig)})`,
+    'cfg=json.load(open(path,encoding="utf-8"))',
+    'rb=cfg.get("robot") or {}',
+    allow ? 'rb["allowChassis"]=True' : 'rb["allowChassis"]=False',
+    'cfg["robot"]=rb',
+    'if os.path.exists(path): shutil.copy2(path, path+".bak")',
+    'd=os.path.dirname(os.path.abspath(path))',
+    'fd,tn=tempfile.mkstemp(dir=d,prefix=".config.",suffix=".tmp")',
+    'f=os.fdopen(fd,"w",encoding="utf-8")',
+    'json.dump(cfg,f,ensure_ascii=False,indent=2); f.write("\\n"); f.close()',
+    'os.replace(tn,path)',
+    'print("WROTE "+str(rb["allowChassis"]))',
+  ].join('\n');
+  const b64 = Buffer.from(py, 'utf8').toString('base64');
+  const w = runPi(t, `printf %s '${b64}' | base64 -d | python3 -`);
+  if (!w.ok) return { ok: false, step: 'write', error: w.stderr || w.stdout || 'remote write failed' };
+  // robot.py caches the flag at startup → restart the client so it re-reads config
+  const rr = runPi(t, `sudo -n systemctl restart ${t.clientService} 2>&1 || systemctl restart ${t.clientService} 2>&1`, 20000);
+  return {
+    ok: rr.ok,
+    allowChassis: allow,
+    restarted: rr.ok,
+    restartError: rr.ok ? null : (rr.stderr || rr.stdout || 'restart failed'),
+    status: rr.ok ? getServiceStatus(cfg) : { active: 'unknown', enabled: 'unknown' },
+  };
 }
 
 // ---- Face library (face_db.py on the Pi, identity recognition) ----

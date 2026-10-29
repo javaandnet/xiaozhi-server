@@ -7,11 +7,8 @@ export const getMasterPiStatus = () => apiGet('studio/masterpi/status');
 
 export const setMasterPiConfig = (body) => apiPost('studio/masterpi/config', body);
 
-export const getStreamStatus = () => apiGet('studio/masterpi/stream/status');
-
-export const startStream = () => apiPost('studio/masterpi/stream/start', {});
-
-export const stopStream = () => apiPost('studio/masterpi/stream/stop', {});
+// MJPEG 预览控制已改走主通道 /api/masterpi/stream/*（见 api/mcp.js 的 *Xz 端点，
+// 云端 hub 侧经 peer 链路转发家里）；studio/masterpi/stream/* 后端仍保留供旧页面用。
 
 export const listFaces = () => apiGet('studio/masterpi/faces');
 

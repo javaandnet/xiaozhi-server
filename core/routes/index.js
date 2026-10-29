@@ -14,6 +14,7 @@ import { registerVoiceFlowRoutes } from './voiceFlowRoutes.js';
 import { registerMcpRoutes } from './mcpRoutes.js';
 import { registerVisionRoutes } from './visionRoutes.js';
 import { registerHomeKitRoutes } from './homekitRoutes.js';
+import { registerPeerRoutes } from './peerRoutes.js';
 
 export function registerApiRoutes(app, ctx) {
   registerDeviceRoutes(app, ctx);
@@ -22,4 +23,5 @@ export function registerApiRoutes(app, ctx) {
   registerMcpRoutes(app, ctx);
   registerVisionRoutes(app, ctx);
   registerHomeKitRoutes(app, ctx);
+  registerPeerRoutes(app, ctx);
 }

@@ -218,7 +218,7 @@
                     <div class="config-panel">
                         <p style="margin:4px 0 10px;font-size:13px;opacity:.75;">
                             唤醒设备后说出下列短语即可切换模式（每行一个，可自由定义；保存后实时生效）。<br>
-                            聊天=默认状态；办公=语音交给数字员工；休息=静默不应答。“退出休息”必须至少保留一个。
+                            聊天=默认状态；办公=语音交给数字员工；休息=静默不应答；对讲=双设备原声透传（按住按键讲话，对方喇叭收听）。“退出休息”必须至少保留一个。
                         </p>
                         <div class="input-group">
                             <label for="modeKwEmployeeOn">进入办公模式：</label>
@@ -251,6 +251,18 @@
                         <div class="input-group">
                             <label for="modeKwPracticeEndAuto">口语模式切自动结束（LLM 判断说完，每段多一次小调用）：</label>
                             <textarea id="modeKwPracticeEndAuto" rows="3" placeholder="每行一个短语，如：自动结束 / auto end"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwIntercomOn">进入对讲机模式（双设备原声透传，按住按键讲话）：</label>
+                            <textarea id="modeKwIntercomOn" rows="3" placeholder="每行一个短语，如：进入对讲模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwIntercomOff">退出对讲机模式（回普通聊天）：</label>
+                            <textarea id="modeKwIntercomOff" rows="3" placeholder="每行一个短语，如：退出对讲模式"></textarea>
+                        </div>
+                        <div class="input-group">
+                            <label for="modeKwIntercomCall">呼叫前缀（前缀+对方人设名，如：呼叫小智二号）：</label>
+                            <textarea id="modeKwIntercomCall" rows="2" placeholder="每行一个前缀，如：呼叫 / 对讲"></textarea>
                         </div>
                         <div class="input-group" style="display:flex;align-items:center;gap:12px;">
                             <button class="tab-btn" id="modeKeywordsSaveBtn" style="min-width:90px;">保存</button>

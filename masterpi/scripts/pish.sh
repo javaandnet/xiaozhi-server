@@ -22,9 +22,24 @@ export SSH_ASKPASS="$ASKPASS_DIR/ap.sh"
 export SSH_ASKPASS_REQUIRE=force
 export DISPLAY="${DISPLAY:-:0}"
 
+# Connection multiplexing: the first command to a host/user opens a master
+# connection (paid via SSH_ASKPASS below), every later command reuses the same
+# socket without re-authenticating. This kills the per-refresh reconnect cost
+# and the sshd throttle that made MasterPi refreshes fail intermittently.
+# Socket path must be stable across invocations, so it is keyed by uid (not $$).
+# %C expands to a hash of (local-ip,local-port,remote-ip,remote-port,user), so
+# different Pi hosts/users get distinct sockets inside one shared dir.
+CM_DIR="${PISH_CM_DIR:-/tmp/pish-cm-$(id -u)}"
+mkdir -p "$CM_DIR" 2>/dev/null || true
+
 SSHOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
          -o PubkeyAuthentication=no -o PreferredAuthentications=password
-         -o ConnectTimeout=10)
+         -o ConnectTimeout=10
+         -o ControlMaster=auto
+         -o "ControlPath=${CM_DIR}/mux-%C"
+         -o ControlPersist=120
+         -o ServerAliveInterval=8
+         -o ServerAliveCountMax=2)
 
 cleanup() { rm -rf "$ASKPASS_DIR"; }
 trap cleanup EXIT

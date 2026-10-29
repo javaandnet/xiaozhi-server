@@ -1,5 +1,5 @@
 /** HomeKit home devices: settings, LAN scan / pairing, direct control and renaming. */
-import { reactive } from 'vue';
+import { computed, reactive } from 'vue';
 import {
   controlHomeKit,
   getHomeKitSettings,
@@ -28,13 +28,49 @@ export function useHomeKit() {
     ui: {},
   });
 
-  /** Slider/switch model of a light, created on first use. */
+  /** Slider/switch model of a light, created on first use. 配件内键可能重名，用 accessoryId 隔离。 */
   function uiOf(light) {
-    if (!hk.ui[light.key]) {
-      hk.ui[light.key] = reactive({ power: false, brightness: 50, colorTemp: 50 });
+    const id = `${light.accessoryId || '-'}|${light.key}`;
+    if (!hk.ui[id]) {
+      hk.ui[id] = reactive({ power: false, brightness: 50, colorTemp: 50 });
     }
-    return hk.ui[light.key];
+    return hk.ui[id];
   }
+
+  /**
+   * 配件分组列表：以 status.lights 的 accessoryId 为主键，扫描结果只补充在线/配对状态。
+   * （灯具键只在单个配件内唯一，所有控制/改名都必须带 accessoryId 回传后端。）
+   */
+  const accessories = computed(() => {
+    const map = new Map();
+    for (const l of hk.status.lights || []) {
+      const id = l.accessoryId || '-';
+      if (!map.has(id)) map.set(id, { id, name: l.accessoryName || id, lights: [], scanned: false, availableForPairing: false });
+      map.get(id).lights.push(l);
+      if (!map.get(id).name || map.get(id).name === id) map.get(id).name = l.accessoryName || id;
+    }
+    for (const d of hk.devices || []) {
+      const hit = map.get(d.id);
+      if (hit) {
+        hit.scanned = true;
+        hit.pairedHere = d.pairedHere;
+        hit.availableForPairing = d.availableForPairing;
+        hit.address = d.address;
+        if (!hit.name || hit.name === hit.id) hit.name = d.name || hit.name;
+      } else {
+        map.set(d.id, {
+          id,
+          name: d.name || d.id,
+          lights: [],
+          scanned: true,
+          pairedHere: d.pairedHere,
+          availableForPairing: d.availableForPairing,
+          address: d.address,
+        });
+      }
+    }
+    return Array.from(map.values());
+  });
 
   async function load() {
     hk.loading = true;
@@ -60,7 +96,7 @@ export function useHomeKit() {
       const r = await getHomeKitStates();
       if (!r.ok) return;
       for (const l of hk.status.lights || []) {
-        const s = r.states?.[l.key];
+        const s = r.states?.[l.accessoryId]?.[l.key];
         if (!s || s.error) continue;
         const ui = uiOf(l);
         if (s.power != null) ui.power = s.power;
@@ -143,7 +179,7 @@ export function useHomeKit() {
 
   async function control(light, args) {
     try {
-      const r = await controlHomeKit(light.key, args);
+      const r = await controlHomeKit(light.key, { ...args, accessoryId: light.accessoryId });
       if (!r.ok) {
         ElMessage.error(r.error || '控制失败');
         await load();
@@ -169,7 +205,7 @@ export function useHomeKit() {
       return;
     }
     try {
-      const res = await renameHomeKit(light.key, name);
+      const res = await renameHomeKit(light.key, name, light.accessoryId);
       if (res.ok) {
         ElMessage.success(`已改名为「${name}」` + (res.persisted ? '' : '（仅本次运行生效）'));
         await load();
@@ -181,5 +217,5 @@ export function useHomeKit() {
     }
   }
 
-  return { hk, uiOf, load, saveSettings, scan, pair, control, rename, fmtTs };
+  return { hk, uiOf, accessories, load, saveSettings, scan, pair, control, rename, fmtTs };
 }

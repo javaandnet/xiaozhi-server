@@ -67,6 +67,18 @@ struct SettingsView: View {
                     Text("填写后播报走鉴权端点 /api/voice/speak；留空则走免鉴权 /api/broadcast。密钥只存本机钥匙串。")
                 }
 
+                // 互联密钥（外出读云端相机帧中继鉴权）
+                Section {
+                    SecureField("互联密钥 (peer.key)", text: $settings.peerKey)
+                        .font(.system(.footnote, design: .monospaced))
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    Text("互联密钥（仅外出需要）")
+                } footer: {
+                    Text("在家（局域网）看预览无需填写；外出连云端时，相机画面经互联帧中继回源家里，需此密钥（与服务 config.peer.key 一致）。只存本机钥匙串。")
+                }
+
                 // 连通性自检
                 Section("连通性自检") {
                     Button {

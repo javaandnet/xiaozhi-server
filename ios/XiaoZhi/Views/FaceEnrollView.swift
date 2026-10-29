@@ -16,6 +16,7 @@ struct FaceEnrollView: View {
         NavigationStack {
             List {
                 previewSection
+                if vm.mode == "watch" { watchSection }
                 alignSection
                 wizardSection
                 facesSection
@@ -30,6 +31,7 @@ struct FaceEnrollView: View {
             .overlay { if vm.isBusy && step == 2 { ProgressView("采集中…").scaleEffect(1.3) } }
             .task {
                 await vm.loadFaces()
+                await vm.detectRole()
                 await vm.refreshStream()
                 if name.isEmpty { name = vm.defaultName() }
                 if !vm.streamRunning { await vm.startStream() }   // 进入即拉起预览，边看边对齐
@@ -42,15 +44,31 @@ struct FaceEnrollView: View {
 
     private var previewSection: some View {
         Section {
-            CameraPreview(url: vm.streamURL)
+            CameraPreview(url: vm.streamURL, headers: vm.streamHeaders)
                 .frame(height: 220)
                 .listRowInsets(EdgeInsets())
                 .clipped()
+            // 三档模式：人脸(带框) / 普通(最流畅) / 看家(低频+变化检测)
+            Picker("模式", selection: Binding(
+                get: { vm.mode },
+                set: { m in Task { await vm.setMode(m) } }
+            )) {
+                ForEach(FaceViewModel.modeOptions, id: \.value) { opt in
+                    Text(opt.label).tag(opt.value)
+                }
+            }
+            .pickerStyle(.segmented)
             HStack {
                 Label(vm.streamRunning ? "预览进行中" : "预览未启动",
                       systemImage: vm.streamRunning ? "video.fill" : "video.slash.fill")
                     .font(.caption)
                     .foregroundStyle(vm.streamRunning ? .green : .secondary)
+                if vm.isRemote {
+                    Label(vm.streamHeaders.isEmpty ? "未填互联密钥" : "帧中继",
+                          systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.caption)
+                        .foregroundStyle(vm.streamHeaders.isEmpty ? .orange : .secondary)
+                }
                 Spacer()
                 Button(vm.streamRunning ? "停止预览" : "启动预览") {
                     Task {
@@ -61,6 +79,54 @@ struct FaceEnrollView: View {
                 .disabled(!vm.hasBody)
             }
         } header: { Text("① 摄像头预览 · 正对被登记者的脸") }
+    }
+
+    // MARK: - 看家事件（mode == watch）
+
+    private var watchSection: some View {
+        Section {
+            if vm.watchEvents.isEmpty {
+                Text("暂无移动检测事件")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(vm.watchEvents) { ev in
+                    HStack(spacing: 10) {
+                        Group {
+                            if let img = vm.watchImages[ev.shot ?? ""] {
+                                Image(uiImage: img)
+                                    .resizable().scaledToFill()
+                                    .frame(width: 96, height: 72)
+                                    .clipped()
+                            } else {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(.quaternary)
+                                    .frame(width: 96, height: 72)
+                                    .overlay(ProgressView().controlSize(.small))
+                            }
+                        }
+                        .cornerRadius(6)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(ev.timeText).font(.caption.monospaced())
+                            if let r = ev.ratio {
+                                Text("变化 \(Int(r * 100))%").font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+        } header: {
+            HStack {
+                Text("🏠 看家事件 · \(vm.watchEvents.count)")
+                Spacer()
+                Button("刷新") { Task { await vm.loadWatch() } }.font(.caption)
+            }
+        } footer: { Text("低频抓帧·画面变化超过阈值即记事件（冷却间隔内不重复）。点击登记向导可切回人脸识别档。")
+            .font(.footnote)
+        }
+        .task { await vm.loadWatch() }
     }
 
     // MARK: - 云台微调

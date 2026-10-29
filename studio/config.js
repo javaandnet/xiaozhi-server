@@ -48,6 +48,11 @@ export const studioConfig = {
     clientService: (fw.masterpi && fw.masterpi.clientService) || 'masterpi-client',
     configPort: Number(fw.masterpi && fw.masterpi.configPort) || 8010,
     streamPort: Number(fw.masterpi && fw.masterpi.streamPort) || 8110,
+    // Watch announce settings: persisted at the TOP-level masterpi.watch of
+    // config.json (peerRoutes POST writes there); also honor firmware.masterpi.watch.
+    // Without this the home-side poller would never start after a cold restart.
+    watch: (mainCfg.masterpi && mainCfg.masterpi.watch)
+      || (fw.masterpi && fw.masterpi.watch) || null,
   },
   serviceChecks: {
     llmUrl: (mainCfg.llm && mainCfg.llm.baseUrl || 'http://127.0.0.1:3300/v1').replace(/\/$/, '') + '/models',

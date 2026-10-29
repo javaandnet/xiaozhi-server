@@ -20,6 +20,7 @@ import { resolveMockFlags } from '../utils/devMode.js';
 import TtsCache from '../utils/ttsCache.js';
 import { STATUS_TEXTS, PRACTICE_STATUS_OVERRIDES, PRACTICE_STATUS_CONTINUE, REST_STATUS_OVERRIDES, MODE_LABELS, currentLang, fixedText } from '../constants/i18n.js';
 import { employeeModeEnabled, askEmployee } from '../services/employeeBridge.js';
+import IntercomService from '../services/intercomService.js';
 
 /**
  * WebSocket 处理器
@@ -45,6 +46,8 @@ class WebSocketHandler {
     this.store = options.store || null;
     // 固定播报 TTS 帧缓存（模式播报/欢迎等常用短句：命中则跳过网络合成与ffmpeg转码）
     this.ttsCache = new TtsCache(this.config.ttsCache || {});
+    // 对讲机原声透传服务（双设备 PTT 半双工，持有本 handler 引用）
+    this.intercomService = new IntercomService(this);
 
     // 音频有效性检测默认阈值（可被设备设置覆盖）
     this.defaultAudioThresholds = {
@@ -240,6 +243,9 @@ class WebSocketHandler {
       this.mcpService.handleDeviceDisconnect(ws.clientId, ws);
     }
 
+    // 对讲机：该 ws 确为房间成员时拆房复位双方（重连后新连接不再处于对讲模式，与休息/员工同口径）
+    this.intercomService.onDisconnect(ws);
+
     if (ws.sessionId) {
       logger.info(`会话结束: ${ws.sessionId} (${ws.clientId})`);
     }
@@ -349,9 +355,9 @@ class WebSocketHandler {
   async handleBinaryData(ws, data) {
     logger.debug(`收到二进制音频数据: ${data.length} bytes (${ws.clientId})`);
 
-    // 语音放送播放期间停止监听：无AEC设备麦克风必收进自己喇叭的广播声，
+    // 语音放送播放/对讲收流期间停止监听：无AEC设备麦克风必收进自己喇叭的广播声，
     // 回声碎片会触发识别并打断广播；直接丢弃音频帧，播放完成+缓冲宽限期后恢复
-    if (ws.broadcastActive || Date.now() < (ws.broadcastIgnoreUntil || 0)) {
+    if (ws.broadcastActive || ws.intercomIncoming || Date.now() < (ws.broadcastIgnoreUntil || 0)) {
       if (!ws.broadcastMutedLogged) {
         logger.info(`🔇 语音放送播放中，暂停麦克风输入 [${ws.clientId}]`);
         ws.broadcastMutedLogged = true;
@@ -365,6 +371,17 @@ class WebSocketHandler {
       return;
     }
     ws.broadcastMutedLogged = false;
+
+    // 对讲透传：PTT（manual）轮不进 VAD/ASR 全链，Opus 上行帧原样转发对端；
+    // 空帧（部分固件的收卷信号）等同松手
+    if (ws.intercomMode && ws.clientListenMode === 'manual') {
+      if (data.length === 0) {
+        await this.intercomService.onListenStop(ws);
+      } else {
+        await this.intercomService.onUplinkFrame(ws, data);
+      }
+      return;
+    }
 
     // 特殊处理：空帧表示录音结束
     if (data.length === 0) {
@@ -635,6 +652,14 @@ class WebSocketHandler {
         if (listenState === LISTEN_STATES.START) {
           // 设备被本地唤醒词唤醒即视为离开"休息"展示态，回聊天（温和休眠下 WS 不断，靠此复位）
           if (ws.restMode) this._clearRestDisplay(ws);
+          // 对讲透传：PTT 按键轮由对讲服务接手机权仲裁，不进普通采集/中止旧播报处理；
+          // 按键即明确讲话意图，与 ABORT 同口径开闸（否则进入提示音的忽略窗口会吞掉首帧）
+          if (ws.intercomMode && ws.clientListenMode === 'manual') {
+            ws.broadcastActive = false;
+            ws.broadcastIgnoreUntil = 0;
+            await this.intercomService.onListenStart(ws);
+            break;
+          }
           // 开始监听，清除音频状态
           // 设备开始新一轮采集，中止截至当前轮次的旧TTS音频流（带轮次归属，后面新轮不受影响）
           // 语音流程采集态豁免：此时在播的是控制器推的题目/反馈（脚本内容），
@@ -653,6 +678,11 @@ class WebSocketHandler {
           // listen<->speak infinite loop). With stt.provider=mock the fixed
           // text is returned only when real voice audio passes the VAD gate.
         } else if (listenState === LISTEN_STATES.STOP) {
+          // 对讲透传：松手收口（尾帧宽限后向对端发 tts stop），不走口语/普通识别路径
+          if (ws.intercomMode && ws.clientListenMode === 'manual') {
+            await this.intercomService.onListenStop(ws);
+            break;
+          }
           // 口语练习模式（手动结束）：按键 stop = “我说完了”收卷信号——
           // 不走 batch 识别（片段已逐段聚合），直接以聚合全文发起总结轮
           if (ws.practiceMode && ws.practiceEndMode !== 'auto') {
@@ -1082,9 +1112,11 @@ class WebSocketHandler {
     for (const d of dm.getAllDevices()) {
       const conn = d.connection;
       if (!conn || conn.readyState !== 1) continue;
-      const ds = conn.deviceSettings
-        || (this.store && conn.deviceId ? this.store.getDeviceSettings(conn.deviceId) : null)
-        || {};
+      let ds = conn.deviceSettings;
+      // 空对象缓存（hello 时 store 无行）也是真值，须显式判空后查库兜底
+      if (!ds || !Object.keys(ds).length) {
+        ds = (this.store && (this.store.getDeviceSettings(conn.deviceId) || this.store.getDeviceSettings(d.deviceId))) || {};
+      }
       const body = ds.robot && ds.robot.body ? String(ds.robot.body).trim().toLowerCase() : null;
       if (body && body === want) {
         return d.deviceId || conn.deviceId || d.clientId;
@@ -1106,7 +1138,18 @@ class WebSocketHandler {
   async _dispatchFaceFound(bodyKey, person, personId) {
     const voiceDevice = this._resolveBoundVoiceDevice(bodyKey);
     if (!voiceDevice) {
-      logger.warn(`[RobotEvent] face_found from ${bodyKey}: 无在线绑定的小智语音设备，未播报`);
+      // 身体注册在云端、其绑定的小智语音设备在线在家里（跨实例）：hub 侧本地解析不到时，
+      // 把事件转发回家侧解析 settings.robot.body 并放送（x-peer-via 防成环，branch 非 hub 不再回转）。
+      if (this.peerLink && this.peerLink.isHub && typeof this.peerLink.branchOnline === 'function' && this.peerLink.branchOnline()) {
+        const r = await this.peerLink.dispatch('POST', '/api/robot/face-found', { bodyKey, person, personId }, 15000);
+        if (!r.error) {
+          logger.info(`[RobotEvent] face_found from ${bodyKey}: 本地无绑定语音设备，已转回家侧解析/放送 (via=home)`);
+          return { ...(r.body || {}), via: 'home' };
+        }
+        logger.warn(`[RobotEvent] face_found from ${bodyKey}: 本地无绑定语音设备，转回家侧失败: ${r.error}`);
+      } else {
+        logger.warn(`[RobotEvent] face_found from ${bodyKey}: 无在线绑定的小智语音设备，未播报`);
+      }
       return { spoken: null };
     }
     let lang = 'zh';
@@ -1244,6 +1287,9 @@ class WebSocketHandler {
     // robot.maxFunctions 控制注入的身体工具数量（不填=全部，>=0 则截断；不影响本机自有工具）。
     // HomeKit 家居工具：独立于机器人设定，但按设备白名单注入（settings.home.enabled=true 的小智才挂载），执行按工具类型路由。
     try {
+      // 纯唤醒/寒暄轮（如只说一句“你好小智”）：本轮不挂载任何工具，LLM 只能纯文本回应，
+      // 从根上消除把招呼语臆断成动作指令而误触发身体 function call 的可能。
+      const suppressTools = this._isWakeOrGreetingOnly(text, ws);
       const robotCfg = this.deviceSettings(ws).robot || {};
       const body = robotCfg.body ? String(robotCfg.body) : null;
       let robotTools = [];
@@ -1269,7 +1315,9 @@ class WebSocketHandler {
       const homeTools = (homeCfg.enabled === true && this.mcpService)
         ? this.mcpService.getFunctionDescriptionsForType(ToolType.HOMEKIT) : [];
       const tools = [...robotTools, ...homeTools];
-      if (tools.length) {
+      if (suppressTools && tools.length) {
+        logger.info(`😺 纯唤醒/寒暄轮，本轮关闭 function-calling（不挂载 ${tools.length} 个工具）[${connectionId}]`);
+      } else if (tools.length) {
         chatOptions.tools = tools;
         if (robotTools.length) chatOptions.robotPersona = true;
         chatOptions.executeToolCall = async (name, args) => {
@@ -2308,17 +2356,53 @@ class WebSocketHandler {
    * 语音模式指令（唤醒后说出即生效，按设备连接保持）。
    * 触发词表完全由配置驱动（config.json → modeKeywords，前台可自由定义，每次识别实时读取热生效）：
    *   { employeeOn:[...] , employeeOff:[...], restOn:[...], restOff:[...],
-   *     practiceOn:[...], practiceOff:[...], practiceEndManual:[...], practiceEndAuto:[...] }
+   *     practiceOn:[...], practiceOff:[...], practiceEndManual:[...], practiceEndAuto:[...],
+   *     intercomOn:[...], intercomOff:[...] }
    * 匹配：识别文本去空格/标点/小写后与短语同口径归一后全等即命中（多语言：英文短语句
-   * 靠小写归一命中，如 "manual end"/"Manual End"；短语自己写清“进入/退出”语义）。
-   * @returns {'employee-on'|'employee-off'|'rest-on'|'rest-off'|'practice-on'|'practice-off'|'practice-end-manual'|'practice-end-auto'|null}
+   * 靠小写归一命中，如 "manual end"/"Manual End"；短语自己写清"进入/退出"语义）。
+   * 口语外壳先被剥掉（见 _stripSpeechShell）："好的，进入休息模式。"、"那进入休息模式吧"
+   * 与裸口令等价；剥离后仍是"整句等于触发词"口径，不是包含匹配。
+   * @returns {'employee-on'|'employee-off'|'rest-on'|'rest-off'|'practice-on'|'practice-off'|'practice-end-manual'|'practice-end-auto'|'intercom-on'|'intercom-off'|null}
    */
+  /**
+   * 口令句的口语外壳剥离：句首应答/称呼前缀（好的/那/请/现在/我们/你…）与句尾语气
+   * 助词（吧/呀/啊/哦/了/呢/嘛/哈/呗/啦…），层层剥到剥不动为止。
+   * 只剥外壳、不拆主干，所以"进入休息模式怎么说"这类提问不会被剥成口令。
+   * 返回数组：第 0 项是原样归一文本（保证短语自身带语气词的口令照旧命中），
+   * 然后依次是各层剥离结果。
+   */
+  _stripSpeechShell(norm) {
+    if (!norm) return [];
+    const LEAD = ['那么', '那就', '那你', '那', '好的', '好啦', '好嘞', '好滴', '好吧', '好', '现在', '接下来', '然后', '请', '请问', '帮我', '我们', '咱们', '我来', '你先', '你', '它', 'ok', 'okay'];
+    const TAIL = ['吧', '呀', '啊', '哦', '噢', '呢', '嘛', '哈', '呗', '啦', '咯', '了', '哟'];
+    const out = [norm];
+    let cur = norm;
+    // 前缀逐层剥（长词优先），每剥一层登记一个候选
+    let guard = 0;
+    while (guard++ < 6) {
+      const hit = LEAD.find((p) => cur.startsWith(p) && cur.length > p.length);
+      if (!hit) break;
+      cur = cur.slice(hit.length);
+      out.push(cur);
+    }
+    // 尾缀逐层剥（已在候选链上继续剪，得到"前缀剔+尾缀剔"的组合形式）
+    const tails = [cur];
+    while (guard++ < 12) {
+      const last = tails[tails.length - 1];
+      const hit = TAIL.find((s) => last.endsWith(s) && last.length > s.length);
+      if (!hit) break;
+      tails.push(last.slice(0, -hit.length));
+    }
+    for (const t of tails) if (!out.includes(t)) out.push(t);
+    return out.filter(Boolean);
+  }
+
   _matchModeCommand(text) {
     const norm = (s) => String(s || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase();
-    const t = norm(text);
-    if (!t) return null;
+    const variants = this._stripSpeechShell(norm(text));
+    if (!variants.length) return null;
     const kw = this.config.modeKeywords || {};
-    const hit = (list) => Array.isArray(list) && list.some((p) => p && norm(p) === t);
+    const hit = (list) => Array.isArray(list) && list.some((p) => p && variants.includes(norm(p)));
     if (hit(kw.employeeOn)) return 'employee-on';
     if (hit(kw.employeeOff)) return 'employee-off';
     if (hit(kw.restOn)) return 'rest-on';
@@ -2327,12 +2411,38 @@ class WebSocketHandler {
     if (hit(kw.practiceOff)) return 'practice-off';
     if (hit(kw.practiceEndManual)) return 'practice-end-manual';
     if (hit(kw.practiceEndAuto)) return 'practice-end-auto';
+    if (hit(kw.intercomOn)) return 'intercom-on';
+    if (hit(kw.intercomOff)) return 'intercom-off';
     return null;
   }
 
   /** 寻址名归一：去空格/标点/符号 + 小写 */
   _normAddr(s) {
     return String(s || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase();
+  }
+
+  /**
+   * 纯唤醒/寒暄判定：整句归一后只是一个唤醒词或打招呼短语（本机人设名变体 + 通用问候），
+   * 没有携带任何动作/查询指令。用于该轮关闭 function calling，避免 LLM 把「你好小智」
+   * 之类的招呼臆断成「主人在跟我打招呼→我该挥个手」而误触发身体动作工具。
+   * 带真实指令的句子（如「你好小智，关闭门灯」）归一后不等于任何候选词，正常放行不受影响。
+   */
+  _isWakeOrGreetingOnly(text, ws) {
+    const norm = this._normAddr(text);
+    if (!norm || norm.length > 12) return false;
+    const selfName = this._normAddr(((this.deviceSettings(ws).persona || {}).name || ''));
+    const candidates = new Set([
+      '小智', '你好小智', '您好小智', '嗨小智',
+      '你好', '您好', '嗨', '哈喽', '喂', 'hello', 'hi', 'hey',
+      '早上好', '下午好', '晚上好', 'goodmorning', 'goodafternoon', 'goodevening',
+    ]);
+    if (selfName) {
+      candidates.add(selfName);
+      candidates.add('你好' + selfName);
+      candidates.add('您好' + selfName);
+      candidates.add('嗨' + selfName);
+    }
+    return candidates.has(norm);
   }
 
   /**
@@ -2376,13 +2486,13 @@ class WebSocketHandler {
 
   /**
    * 下发当前会话模式标签到设备屏幕顶部栏（layout #6）：
-   * 仅 休息 / 口语 / 员工 / 聊天 四种（待命属于聊天态，不再单独显示）
+   * 仅 休息 / 对讲 / 口语 / 员工 / 聊天 五种（待命属于聊天态，不再单独显示）
    */
   _sendMode(ws) {
     // 休息/口语/员工优先；普通态下若开发模式总开关打开则显示"开发"，否则"聊天"。
     // 标签语种：设备个体设定 > 全局默认语言（托底），每次实时读取。
     const flags = resolveMockFlags(this.config);
-    const key = ws.restMode ? 'rest' : (ws.practiceMode ? 'practice' : (ws.employeeMode ? 'employee' : (flags.master ? 'dev' : 'chat')));
+    const key = ws.restMode ? 'rest' : (ws.intercomMode ? 'intercom' : (ws.practiceMode ? 'practice' : (ws.employeeMode ? 'employee' : (flags.master ? 'dev' : 'chat'))));
     const lang = this.deviceLang(ws);
     const label = (MODE_LABELS[lang] || MODE_LABELS.zh)[key];
     this.sendMessage(ws, {
@@ -2437,11 +2547,53 @@ class WebSocketHandler {
   _clearRestDisplay(ws) {
     if (!ws || !ws.restMode) return;
     ws.restMode = false;
+    // 休息期间设备停麦不上行音频，空闲时钟冻结在进休息前；不清零的话唤醒后的
+    // 第一帧就会命中无语音超时，刚叫醒它就先收到一句再见
+    ws.lastActivityTime = Date.now();
+    ws.closeAfterChat = false;
     if (this.store && ws.deviceId) this.store.markDeviceRest(ws.deviceId, 0);
     this._sendMode(ws);
     this.sendI18n(ws); // 同步清除「待命→休息」状态覆盖
     this._sendEmotion(ws, 'neutral');
     logger.info(`☀️ 退出休息（恢复聊天） [${ws.clientId}]`);
+  }
+
+  /**
+   * 进入休息（温和休眠）：置"休息"展示态并下发 sleep，让设备停止监听回待机。
+   * 三个入口共用：语音口令"进入休息"、告别意图、长时间无语音的闲置结束。
+   * @param {WebSocket} ws - WebSocket连接
+   * @param {Object} opts - { speak: 休眠前先执行的播报（async，如固定告别语/LLM 告别轮）, source: 触发来源 }
+   */
+  async _enterRestMode(ws, { speak = null, source = 'manual' } = {}) {
+    if (!ws || ws.readyState !== 1) return;
+    // 外设/机器人类连接不是小智语音设备，没有"休息"演出可言
+    if (['robot', 'peripheral', 'mcp_only'].includes(String(ws.deviceType || '').toLowerCase())) return;
+    // 已在休息：休眠动作无增量，不重复播报/不重复下发 sleep/不重复写 resting
+    // （休息态下再命中 rest-on 口令或告别词就走到这里）
+    if (ws.restMode) {
+      logger.debug(`💤 已在休息态，忽略重复休眠（${source}） [${ws.clientId}]`);
+      return;
+    }
+
+    ws.restMode = true; // 仅作"休息"展示态：不再据此屏蔽输入
+    ws.employeeMode = false; // 互斥：休息优先
+    ws.closeAfterChat = false;
+    ws.lastActivityTime = Date.now(); // 空闲时钟归零，休息态下不重复触发闲置结束
+    // 待命期间 WS 仍保持连接，靠该持久标记把设备展示为"休息"（唤醒/重连即复位）
+    if (this.store && ws.deviceId) this.store.markDeviceRest(ws.deviceId, 1);
+    logger.info(`💤 进入休息（${source}，回待机，说本机唤醒词即可恢复） [${ws.clientId}]`);
+    this._sendMode(ws);
+    this.sendI18n(ws); // 先推「待命→休息」覆盖，再休眠回 idle 时状态栏即显示休息
+    // 播报在休息态下进行：TTS stop 自带 listen:disable，播完不会回到"倾听中"
+    if (speak) await speak();
+    // 下发休眠指令让设备停止监听回 Idle（温和休眠，保持连接），消除"卡在倾听中"
+    this.sendMessage(ws, {
+      type: SERVER_MESSAGE_TYPES.SLEEP,
+      session_id: ws.sessionId,
+      timestamp: new Date().toISOString()
+    });
+    this._sendEmotion(ws, 'sleepy'); // 尽力切表情：主题含同名图才生效，否则维持待机画面
+    logger.info(`💤 已下发休眠指令，设备进入待机 [${ws.clientId}]`);
   }
 
   /** 告别/休眠播报文案（唤醒词由设备本地识别，此处只作提示） */
@@ -2547,6 +2699,33 @@ class WebSocketHandler {
   }
 
   /**
+   * 对讲机模式远程开关（/api/settings/intercom 调用）：按 deviceId 找在线连接
+   * 进入/退出对讲（进入需能解析对端：peer 参数或本机 settings.intercom.peer）。
+   * @returns {Promise<{applied:number, failed:number, error?:string}>}
+   */
+  async applyIntercomMode(deviceId, on, peer = null) {
+    const dm = this.getDeviceManager();
+    if (!dm || !dm.getAllDevices) return { applied: 0, failed: 0, error: '设备管理器未初始化' };
+    let applied = 0;
+    let failed = 0;
+    let lastError = null;
+    for (const d of dm.getAllDevices()) {
+      const conn = d.connection;
+      if (!conn || conn.readyState !== 1) continue;
+      if (deviceId && !this._sameIdent(d.deviceId, deviceId) && !this._sameIdent(conn.deviceId, deviceId) && !this._sameIdent(conn.clientId, deviceId)) continue;
+      if (on) {
+        const ok = await this.intercomService.enter(conn, peer || null);
+        if (ok) applied++; else { failed++; lastError = '对端未指定或离线'; }
+      } else {
+        await this.intercomService.exit(conn, { silent: true });
+        applied++;
+      }
+    }
+    console.log(`📻 intercom mode ${on ? 'on' : 'off'} applied=${applied} failed=${failed}, deviceId=${deviceId || 'all'}`);
+    return { applied, failed, error: lastError };
+  }
+
+  /**
    * 语音流程采集态（去域化，供 /api/voice/session 调用）：让设备进入“口语聚合式
    * 作答采集”，复用 practiceBuffer/listen stop/auto 全套机制；收卷时把整段转写
    * POST 回 callbackUrl（谁发起会话谁收答案）。与口语练习模式的区别只在收卷出口。
@@ -2628,22 +2807,27 @@ class WebSocketHandler {
       return true;
     }
     if (modeCmd === 'rest-on') {
-      ws.restMode = true; // 仅作"休息"展示态：不再据此屏蔽输入
-      ws.employeeMode = false; // 互斥：休息优先
-      // 待命期间 WS 仍保持连接，靠该持久标记把设备展示为"休息"（唤醒/重连即复位）
-      if (this.store && ws.deviceId) this.store.markDeviceRest(ws.deviceId, 1);
-      logger.info(`💤 进入休息（回待机，说本机唤醒词即可恢复） [${ws.clientId}]`);
-      this._sendMode(ws);
-      this.sendI18n(ws); // 先推「待命→休息」覆盖，再休眠回 idle 时状态栏即显示休息
-      await this._speakFixed(ws, fixedText(this.deviceLang(ws), 'restEnter'));
-      // 下发休眠指令让设备停止监听回 Idle（温和休眠，保持连接），消除"卡在倾听中"
-      this.sendMessage(ws, {
-        type: SERVER_MESSAGE_TYPES.SLEEP,
-        session_id: ws.sessionId,
-        timestamp: new Date().toISOString()
+      await this._enterRestMode(ws, {
+        source: '语音口令',
+        speak: () => this._speakFixed(ws, fixedText(this.deviceLang(ws), 'restEnter'))
       });
-      this._sendEmotion(ws, 'sleepy'); // 尽力切表情：主题含同名图才生效，否则维持待机画面
-      logger.info(`💤 已下发休眠指令，设备进入待机 [${ws.clientId}]`);
+      return true;
+    }
+    // ==================== 对讲机模式（双设备 Opus 原帧透传，PTT 半双工）====================
+    // 进入：词表 intercomOn，或「呼叫+人设名」（intercomCall 前缀）携寻址对端；
+    // 退出：词表 intercomOff（仅在本机处于对讲时消费，否则回落聊天普通轮）。
+    // 对讲中说的其它话不拦：auto/唤醒轮照常走识别链路（能切回聊天/其它模式）。
+    if (modeCmd === 'intercom-on') {
+      await this.intercomService.enter(ws, null);
+      return true;
+    }
+    if (modeCmd === 'intercom-off' && ws.intercomMode) {
+      await this.intercomService.exit(ws);
+      return true;
+    }
+    const intercomCallName = this.intercomService.matchCall(text);
+    if (intercomCallName) {
+      await this.intercomService.enter(ws, intercomCallName);
       return true;
     }
     // ==================== 口语练习模式（长段讲述不抢答）====================
@@ -3336,21 +3520,11 @@ class WebSocketHandler {
     if (!isGoodbye) return false;
 
     logger.info(`👋 检测到退出意图: "${text}" [${ws.clientId}]`);
-    const farewell = this._sleepFarewellText();
     // 告别休眠同样置"休息"展示态（屏幕模式标签 + 后台状态），与语音进休一致
-    ws.restMode = true;
-    ws.employeeMode = false;
-    if (this.store && ws.deviceId) this.store.markDeviceRest(ws.deviceId, 1);
-    this._sendMode(ws);
-    // 播完告别语音再发 sleep（轮次号+1：大于既有中止线，不会被残留打断信号误杀）
-    await this.sendTtsAudio(ws, ws.sessionId, farewell, (ws.turnSeq || 0) + 1);
-    this.sendMessage(ws, {
-      type: SERVER_MESSAGE_TYPES.SLEEP,
-      session_id: ws.sessionId,
-      timestamp: new Date().toISOString()
+    await this._enterRestMode(ws, {
+      source: '告别意图',
+      speak: () => this._speakFixed(ws, this._sleepFarewellText())
     });
-    this._sendEmotion(ws, 'sleepy'); // 尽力切表情：主题含同名图才生效，否则维持待机画面
-    logger.info(`💤 已下发休眠指令，设备回待机等待唤醒 [${ws.clientId}]`);
     return true;
   }
 
@@ -3555,6 +3729,14 @@ class WebSocketHandler {
       return;
     }
 
+    // 办公(员工)模式与外部语音流程采集态：静默是常态（等对方作答），不做闲置结束，
+    // 否则一句告别会把工作轮打断并把设备带回待机
+    if (ws.employeeMode || ws.flowCollect) {
+      ws.lastActivityTime = now;
+      ws.closeAfterChat = false;
+      return;
+    }
+
     // 休息态是"保持连接待唤"的展示态：设备不发有效语音属预期，不做无语音巡检。
     // 且休息期间把空闲时钟推到当下：否则时钟冻结在进休息前，用户唤醒后的第一帧
     // 会立即触发告别语（实测：退出休息 97ms 后就播出 end_prompt）。
@@ -3579,14 +3761,20 @@ class WebSocketHandler {
       const timeout = (this.config.close_connection_no_voice_time || 120) * 1000;
 
       if (!ws.closeAfterChat && noVoiceTime > timeout) {
-        logger.info(`长时间无语音，结束本轮对话 [${ws.clientId}]`);
+        logger.info(`长时间无语音，结束本轮对话并进入休息 [${ws.clientId}]`);
         ws.closeAfterChat = true;
 
         // 发送结束提示
         const endPrompt = this.config.end_prompt?.prompt ||
           '请你以```时间过得真快```为开头，用富有感情、依依不舍的话来结束这场对话吧。';
 
-        await this._startToChat(ws, endPrompt);
+        // 告别轮必须在休息态里播：restMode 先置位，TTS stop 才会带 listen:disable，
+        // 播完即回待机而不是重新开麦——否则设备喇叭又被自己听见，空闲计数复位后
+        // 再走一轮 end_prompt，表现为反复说再见却永不休息
+        await this._enterRestMode(ws, {
+          source: `长时间无语音(${Math.round(noVoiceTime / 1000)}s)`,
+          speak: () => this._startToChat(ws, endPrompt)
+        });
       }
     }
   }

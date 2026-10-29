@@ -17,7 +17,8 @@ const HAP = {
   SERVICE_LIGHTBULB: '43',
   CHAR_ON: '25',
   CHAR_BRIGHTNESS: '8',
-  CHAR_COLOR_TEMP: 'ce'
+  CHAR_COLOR_TEMP: 'ce',
+  CHAR_NAME: '23'
 };
 
 /**
@@ -53,7 +54,9 @@ class HomeKitService extends BaseService {
 
     // accessoryId -> HttpClient (persistent)
     this.clients = new Map();
-    // lightKey -> { key, name, aid, onIid, brightnessIid, colorTempIid, ranges, client }
+    // accessoryId -> Map(lightKey -> { key, name, aid, onIid, brightnessIid, colorTempIid, ranges, client, ... })
+    // 灯具按配件分组：lightKey（a<aid>_s<siid>）只在单个配件内唯一，跨配件会撞车
+    // （例如 iHaper 的运动传感器 iid=11 与 Yeelight 灯泡的灯服务 iid=11），必须分组保存。
     this.lights = new Map();
     this.lastStartAt = null;
   }
@@ -134,7 +137,7 @@ class HomeKitService extends BaseService {
           console.error(`[HomeKit] setup failed for ${svc.name || svc.id}: ${e.message}`);
         }
       }
-      console.log(`[HomeKit] startup done, controllable lights: ${this.lights.size}`);
+      console.log(`[HomeKit] startup done, controllable lights: ${this.getLights().length}`);
     } catch (e) {
       console.error(`[HomeKit] startup error: ${e.message}`);
     }
@@ -146,6 +149,26 @@ class HomeKitService extends BaseService {
     }
     this.clients.clear();
     this.lights.clear();
+  }
+
+  /**
+   * 历史 names 键可能落在错误的配件下（旧版跨配件键撞车时，后索引的配件会顶掉前一个的条目）。
+   * 启动索引完成后做一次幂等迁移：旧键的短键（s<siid>）在当前灯集中唯一命中时，把名称搬到正确配件下。
+   */
+  _migrateLegacyNames() {
+    const lights = this.getLights();
+    for (const [oldKey, name] of Object.entries(this.names)) {
+      if (lights.some((l) => l.nameKey === oldKey)) continue;
+      const short = String(oldKey).split('#')[1];
+      if (!short) continue;
+      const hits = lights.filter((l) => String(l.nameKey).split('#')[1] === short);
+      if (hits.length !== 1) continue;
+      const target = hits[0];
+      this.names[target.nameKey] = name;
+      delete this.names[oldKey];
+      target.name = name;
+      console.log(`[HomeKit] migrated name "${name}": ${oldKey} -> ${target.nameKey}`);
+    }
   }
 
   // ---------------- discovery ----------------
@@ -223,6 +246,8 @@ class HomeKitService extends BaseService {
     const id = service.id; const serviceName = service.name;
     const res = await this._withTimeout(client.getAccessories(), '获取配件描述(accessories)');
     const accessories = res.accessories || res || [];
+    const byAccessory = this.lights.get(id) || new Map();
+    this.lights.set(id, byAccessory);
     let idx = 0;
     for (const acc of accessories) {
       const aid = Number(acc.aid);
@@ -235,9 +260,13 @@ class HomeKitService extends BaseService {
           if (t === HAP.CHAR_ON) onIid = iid;
           else if (t === HAP.CHAR_BRIGHTNESS) brightnessIid = iid;
           else if (t === HAP.CHAR_COLOR_TEMP) colorTempIid = iid;
-          else if (t === '23' && ch.value && typeof ch.value === 'string') nameChar = ch.value;
+          else if (t === HAP.CHAR_NAME && ch.value && typeof ch.value === 'string') nameChar = ch.value;
         }
-        if (onIid == null) continue;
+        // 没有可写 On 特征的不是灯（如传感器/自定义服务），跳过，避免产生不可控的幽灵条目
+        if (onIid == null) {
+          console.log(`[HomeKit] skip non-controllable service ${serviceName || id} (aid=${aid}, sid=${svc.iid}, type=${normalizeType(svc.type)})`);
+          continue;
+        }
         idx += 1;
         const key = `a${aid}_s${svc.iid}`;
         const nameKey = `${String(id).toLowerCase()}#s${svc.iid}`;
@@ -252,13 +281,16 @@ class HomeKitService extends BaseService {
           ranges: {},
           client,
           accessoryId: id,
+          accessoryName: serviceName || id,
           address: service.address,
           port: service.port
         };
-        this.lights.set(key, light);
+        byAccessory.set(key, light);
         await this._fetchRanges(light).catch((e) => debug(e));
       }
     }
+    // 索引后立即修正可能挂错配件的历史名称（也覆盖 on-demand 配对路径）
+    this._migrateLegacyNames();
   }
 
   /**
@@ -273,7 +305,7 @@ class HomeKitService extends BaseService {
     try {
       const client = new HttpClient(light.accessoryId, light.address, light.port, data);
       this.clients.set(light.accessoryId, client);
-      for (const l of this.lights.values()) {
+      for (const l of this.getLights()) {
         if (l.accessoryId === light.accessoryId) l.client = client;
       }
       console.log(`[HomeKit] rebuilt session for ${light.name || light.accessoryId}`);
@@ -302,8 +334,38 @@ class HomeKitService extends BaseService {
 
   // ---------------- control ----------------
 
+  /** 全部灯具（扁平列表，每项含 accessoryId/accessoryName）。 */
   getLights() {
-    return Array.from(this.lights.values());
+    const out = [];
+    for (const m of this.lights.values()) out.push(...m.values());
+    return out;
+  }
+
+  /** 指定配件下的灯具列表。 */
+  getLightsForAccessory(accessoryId) {
+    const m = this.lights.get(accessoryId);
+    return m ? Array.from(m.values()) : [];
+  }
+
+  /**
+   * 解析目标灯：lightKey 只在配件内唯一，跨配件可能重名（如两个配件都有 a1_s11）。
+   * 优先用 accessoryId 精确定位；只给 lightKey 时在所有配件中收集匹配项，
+   * 恰好 1 个才放行，歧义时抛出可选配件清单（绝不静默回退到别的灯）。
+   */
+  _resolveLight(lightKey, accessoryId) {
+    if (accessoryId) {
+      const light = (this.lights.get(accessoryId) || new Map()).get(lightKey);
+      if (!light) throw new Error(`配件 ${accessoryId} 下不存在灯具 ${lightKey}（可能已离线）`);
+      return light;
+    }
+    if (!lightKey) throw new Error('缺少灯具标识');
+    const candidates = this.getLights().filter((l) => l.key === lightKey);
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) {
+      const opts = candidates.map((l) => `${l.name}(${l.accessoryId})`).join('、');
+      throw new Error(`灯具键 ${lightKey} 在多个配件间重名，无法确定目标：${opts}，请指定 accessoryId`);
+    }
+    throw new Error(`灯具 ${lightKey} 不在线或不存在`);
   }
 
   lightKeyFromTool(toolName) {
@@ -354,16 +416,17 @@ class HomeKitService extends BaseService {
   }
 
   /**
-   * Read live state of all indexed lights in parallel (each timeout-protected).
-   * Returns { [lightKey]: {power,brightnessPct,colorTempPct} | {error} } for UI sync.
+   * 拉取全部灯具真实状态，返回 { [accessoryId]: { [lightKey]: state } }。
+   * lightKey 只在配件内唯一，状态必须按配件分组回传，否则同名键会互相覆盖。
    */
   async getStates() {
     const out = {};
-    await Promise.all([...this.lights.values()].map(async (light) => {
+    await Promise.all(this.getLights().map(async (light) => {
+      const group = out[light.accessoryId] || (out[light.accessoryId] = {});
       try {
-        out[light.key] = await this.readState(light);
+        group[light.key] = await this.readState(light);
       } catch (e) {
-        out[light.key] = { error: e.message };
+        group[light.key] = { error: e.message };
       }
     }));
     return out;
@@ -374,10 +437,9 @@ class HomeKitService extends BaseService {
    * 控制类指令以设备实际状态为准：下发前先读真实状态（已处于目标态则据实告知），
    * 下发后回读校验，返回基于真实状态的确认文案。
    */
-  async applyControl(lightKey, args) {
+  async applyControl(lightKey, args, accessoryId = null) {
     if (!this.enabled) throw new Error('HomeKit 功能未启用');
-    const light = (lightKey && this.lights.get(lightKey)) || this.getLights()[0];
-    if (!light) throw new Error('尚未发现可控制的 HomeKit 灯具');
+    const light = this._resolveLight(lightKey, accessoryId);
 
     const a = typeof args === 'string' ? JSON.parse(args || '{}') : (args || {});
     const wantsPower = typeof a.power === 'boolean';
@@ -439,6 +501,10 @@ class HomeKitService extends BaseService {
       lights: this.getLights().map((l) => ({
         key: l.key,
         name: l.name,
+        accessoryId: l.accessoryId,
+        accessoryName: l.accessoryName,
+        address: l.address,
+        port: l.port,
         hasBrightness: l.brightnessIid != null,
         hasColorTemp: l.colorTempIid != null
       }))
@@ -482,9 +548,8 @@ class HomeKitService extends BaseService {
   /**
    * 重命名灯具：更新内存映射并返回映射对象（由调用方写回 config.json 持久化）。
    */
-  renameLight(lightKey, newName) {
-    const light = this.lights.get(lightKey);
-    if (!light) throw new Error(`灯具 ${lightKey} 不在线或不存在`);
+  renameLight(lightKey, newName, accessoryId = null) {
+    const light = this._resolveLight(lightKey, accessoryId);
     const name = String(newName || '').trim();
     if (!name) throw new Error('名称不能为空');
     this.names[light.nameKey] = name;

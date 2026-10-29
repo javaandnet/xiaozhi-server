@@ -208,6 +208,51 @@ TOOLS = [
             "required": ["x", "y", "z"],
         },
     },
+    {
+        "name": "robot.press",
+        "description": "用机械臂做一次'点按':先悬停到接触点上方 hover_cm,再下压到接触点 (x,y,z),停顿后抬起回悬停位。坐标是机械臂基座系(单位厘米),由调用方手动给出(不含视觉解算),用于探测真实定位精度(例如'把手按到前方 10cm 高 5cm 处')。安全盒自动限幅,任一段无解即中止。绝不动车轮。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number", "description": "左右偏移,厘米,-12~12"},
+                "y": {"type": "number", "description": "前后深度,厘米,0~16"},
+                "z": {"type": "number", "description": "接触点高度,厘米,4~30"},
+                "pitch": {"type": "number", "description": "末端俯仰角,-90~90,默认 0"},
+                "hover_cm": {"type": "number", "description": "下压前悬停高度增量,厘米,0.5~10,默认 3"},
+                "hold_ms": {"type": "number", "description": "按住时长毫秒,0~2000,默认 250"},
+            },
+            "required": ["x", "y", "z"],
+        },
+    },
+    {
+        "name": "robot.grasp",
+        "description": "用机械臂夹爪抓取一个物体(宏,带视觉自判):抬臂→张开→回校验机位拍前帧→移到物体上方→下探→合爪→抬起→回同一机位拍后帧。本机全身开环 PWM 舵机、无夹持/力反馈,故用相机比较'桌上物体区域'前后帧来自判夹没夹到:物体被抬离桌面(该区域亮白消失)则 grasped=true,还在原位则 grasped=false。坐标 (x,y,z) 为物体处夹爪应到达的抓取点(机械臂基座系,单位厘米,桌面物体需负 z),由调用方手动给出(不含视觉解算)。建议 pitch=-90 使夹爪竖直朝下。verify=false 可关自判。安全盒自动限幅。绝不动车轮。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number", "description": "左右偏移,厘米,-18~18"},
+                "y": {"type": "number", "description": "前后深度,厘米,0~17"},
+                "z": {"type": "number", "description": "抓取高度,厘米,-3~30(原点=臂底座,桌面在负区;已验证白色物体示教位 z=-1)"},
+                "pitch": {"type": "number", "description": "末端俯仰角,-90~90;抓取建议 -90(夹爪竖直朝下),默认 0"},
+                "hover_cm": {"type": "number", "description": "下探前悬停高度增量,厘米,1~12,默认 4"},
+                "lift_cm": {"type": "number", "description": "抓起后抬起高度增量,厘米,2~18,默认 6"},
+                "verify": {"type": "boolean", "description": "是否启用视觉自判(默认 true):回校验机位拍前后帧比桌上物体区域亮白,自动判 grasped 真假;非白色/不可见物体可置 false"},
+            },
+            "required": ["x", "y", "z"],
+        },
+    },
+    {
+        "name": "robot.gripper",
+        "description": "独立控制机械臂夹爪的开合(伺服舵机 servo1),不带动机械臂关节也不动车轮。用于示教/调试:先把夹爪张开,手动将物体送到两爪之间,再合爪。action=open(全开)/close(夹紧)/half(半开)为预设,优先于 pulse;pulse 为裸脉宽 1000(夹紧)~2000(全开)。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["open", "close", "half"], "description": "预设动作,优先于 pulse"},
+                "pulse": {"type": "number", "description": "裸脉宽 1000~2000,action 未给时生效,默认 1800"},
+                "travel_sec": {"type": "number", "description": "行程时间(秒),0.1~2,默认 0.5"},
+            },
+        },
+    },
 ]
 
 
@@ -260,4 +305,14 @@ def build_dispatcher(robot):
         "robot.camera_snapshot": lambda a: robot.camera_snapshot(),
         "robot.arm_ik": lambda a: robot.arm_ik(a.get("x", 0), a.get("y", 6), a.get("z", 18),
                                                 a.get("pitch", 0), a.get("movetime_ms", 1500)),
+        "robot.press": lambda a: robot.press(a.get("x", 0), a.get("y", 6), a.get("z", 6),
+                                             a.get("pitch", 0), a.get("hover_cm", 3),
+                                             a.get("hold_ms", 250), a.get("movetime_ms", 1200)),
+        "robot.grasp": lambda a: robot.grasp(a.get("x", 0), a.get("y", 12), a.get("z", 4),
+                                             a.get("pitch", 0), a.get("hover_cm", 4),
+                                             a.get("lift_cm", 6), a.get("grip_travel", 0.5),
+                                             a.get("movetime_ms", 1200), a.get("home", True),
+                                             a.get("verify", True)),
+        "robot.gripper": lambda a: robot.gripper(a.get("pulse", 1800), a.get("action"),
+                                                 a.get("travel_sec", 0.5)),
     }

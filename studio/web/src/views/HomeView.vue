@@ -1,13 +1,33 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useHomeKit } from '@/composables/useHomeKit';
 import { useRefreshBus } from '@/composables/useRefreshBus';
 import { fmtTs } from '@/composables/useFormat';
 
-const { hk, uiOf, load, saveSettings, scan, pair, control, rename } = useHomeKit();
+const { hk, uiOf, accessories, load, saveSettings, scan, pair, control, rename } = useHomeKit();
 const { register, unregister } = useRefreshBus();
 
 const unpairHelpVisible = ref(false);
+
+// 选中配件：点击扫描列表行切换下方控制区。默认优先选有可控灯具的第一台，否则选扫描到的第一台。
+const selectedId = ref('');
+const selected = computed(() => accessories.value.find((a) => a.id === selectedId.value) || null);
+watch(accessories, (list) => {
+  if (list.some((a) => a.id === selectedId.value)) return;
+  const first = list.find((a) => a.lights.length) || list.find((a) => a.scanned) || list[0];
+  selectedId.value = first ? first.id : '';
+});
+
+/** 行点击：选中该配件；尚未配对时顺手弹配对框（扫描行没有可控灯具，选中无意义） */
+function onRowClick(row) {
+  if (!row) return;
+  selectedId.value = row.id;
+  if (!row.pairedHere && row.availableForPairing) pair(row);
+}
+
+function rowClass({ row }) {
+  return row.id === selectedId.value ? 'hk-row-selected' : '';
+}
 
 onMounted(() => {
   register(load);
@@ -66,8 +86,24 @@ onBeforeUnmount(unregister);
       <el-button type="primary" :loading="hk.scanning" @click="scan">🔍 扫描设备</el-button>
       <span class="hint">目标需处于“可配对”状态（已被其它家庭绑定时请先在家庭 App 移除配件）；进入页面已自动扫描一次，点“配对”时再输入 HomeKit 配对码</span>
     </div>
-    <el-table :data="hk.devices" size="small" max-height="300">
-      <el-table-column prop="name" label="名称" min-width="160" />
+    <el-table
+      :data="hk.devices"
+      size="small"
+      max-height="300"
+      highlight-current-row
+      row-key="id"
+      :row-class-name="rowClass"
+      style="cursor: pointer"
+      @row-click="onRowClick"
+    >
+      <el-table-column prop="name" label="名称" min-width="160">
+        <template #default="s">
+          <span>{{ s.row.name }}</span>
+          <el-tag v-if="(s.row.lights || []).length" size="small" effect="plain" style="margin-left: 6px">
+            {{ s.row.lights.map((l) => l.name).join('、') }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="id" label="配件ID" width="180">
         <template #default="s"><span class="mono">{{ s.row.id }}</span></template>
       </el-table-column>
@@ -101,6 +137,7 @@ onBeforeUnmount(unregister);
       </el-table-column>
     </el-table>
     <div v-if="!hk.devices.length" class="hint">暂无扫描结果，点“扫描设备”发现局域网内的 HomeKit 配件。</div>
+    <div class="hint">单击设备行可切换下方“设备控制”的目标配件（可配对的行会同时弹出配对框）。</div>
     <el-dialog v-model="unpairHelpVisible" title="如何解除 HomeKit 配对（让设备回到“可配对”状态）" width="640px">
       <div class="unpair-help">
         <p>“已被其它控制端占用”表示该配件的 mDNS 广播中没有 <b>cf=1</b>（可配对）标志——配件内部仍保存着一个有效的 HomeKit 配对，并非本机（Homecenter）占用的。<b>仅从 iPhone“家庭”App 移除 ≠ 配件复位</b>，配对信息存在配件本体上。</p>
@@ -130,26 +167,39 @@ onBeforeUnmount(unregister);
   </el-card>
 
   <el-card class="card" shadow="never">
-    <template #header><b>💡 设备控制</b></template>
-    <div v-for="l in hk.status.lights" :key="l.key" class="light-row">
-      <b style="min-width: 120px">{{ l.name }}</b>
-      <el-button size="small" text @click="rename(l)">✎ 改名</el-button>
-      <span class="mono hint">{{ l.key }}</span>
-      <el-switch
-        v-model="uiOf(l).power"
-        active-text="电源"
-        @change="(v) => control(l, { power: v })"
-      />
-      <template v-if="l.hasBrightness">
-        <span class="hint">亮度</span>
-        <el-slider v-model="uiOf(l).brightness" :min="0" :max="100" style="width: 180px" @change="(v) => control(l, { brightness: v })" />
-      </template>
-      <template v-if="l.hasColorTemp">
-        <span class="hint">暖度</span>
-        <el-slider v-model="uiOf(l).colorTemp" :min="0" :max="100" style="width: 180px" @change="(v) => control(l, { color_temp: v })" />
-      </template>
-    </div>
-    <div v-if="!(hk.status.lights || []).length" class="hint">
+    <template #header>
+      <div style="display: flex; align-items: center; gap: 10px">
+        <b>💡 设备控制</b>
+        <el-select v-model="selectedId" size="small" placeholder="选择设备" style="width: 260px">
+          <el-option v-for="a in accessories" :key="a.id" :label="a.name" :value="a.id" />
+        </el-select>
+        <span v-if="selected" class="hint mono">{{ selected.id }}</span>
+      </div>
+    </template>
+    <template v-if="selected">
+      <div v-for="l in selected.lights" :key="l.key" class="light-row">
+        <b style="min-width: 120px">{{ l.name }}</b>
+        <el-button size="small" text @click="rename(l)">✎ 改名</el-button>
+        <span class="mono hint">{{ l.key }}</span>
+        <el-switch
+          v-model="uiOf(l).power"
+          active-text="电源"
+          @change="(v) => control(l, { power: v })"
+        />
+        <template v-if="l.hasBrightness">
+          <span class="hint">亮度</span>
+          <el-slider v-model="uiOf(l).brightness" :min="0" :max="100" style="width: 180px" @change="(v) => control(l, { brightness: v })" />
+        </template>
+        <template v-if="l.hasColorTemp">
+          <span class="hint">暖度</span>
+          <el-slider v-model="uiOf(l).colorTemp" :min="0" :max="100" style="width: 180px" @change="(v) => control(l, { color_temp: v })" />
+        </template>
+      </div>
+      <div v-if="!selected.lights.length" class="hint">
+        该配件当前无可控灯具（未配对、离线或不提供灯服务）。{{ selected.scanned ? '' : '（本次扫描未见到它，可能已下线）' }}
+      </div>
+    </template>
+    <div v-else class="hint">
       暂无在线灯具：确认设备已上电入网、已配对，或点上方扫描后配对。
     </div>
     <div class="hint" style="margin-top: 8px">
@@ -165,6 +215,10 @@ onBeforeUnmount(unregister);
   gap: 14px;
   padding: 8px 0;
   border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+:deep(.hk-row-selected) {
+  --el-table-tr-bg-color: var(--el-color-primary-light-9);
 }
 </style>
 

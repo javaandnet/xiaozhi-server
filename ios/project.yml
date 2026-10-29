@@ -36,6 +36,8 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        # 出口合规：仅使用系统 TLS（HTTPS/WSS）与 Keychain，无自定义加密，声明豁免以免每次上传弹加密文稿问卷
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         # xiaozhi-server 根地址（本仓库默认端口 8003）：真机测试指向 Mac 局域网 IP，
         # 需与后端同一 Wi-Fi（服务端 config.host 须为 0.0.0.0）；App 内「设置」页可覆盖此值。

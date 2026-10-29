@@ -15,6 +15,21 @@ final class HomeViewModel: ObservableObject {
     var lights: [XZHomeLight] { status?.lights ?? [] }
     var isEnabled: Bool { status?.enabled == true || settings.enabled == true }
 
+    /// 按配件分组（灯具键只在配件内唯一，控制须带 accessoryId）
+    var accessoryGroups: [(id: String, name: String, lights: [XZHomeLight])] {
+        var order: [String] = []
+        var map: [String: (id: String, name: String, lights: [XZHomeLight])] = [:]
+        for l in lights {
+            let id = l.accessoryId ?? "-"
+            if map[id] == nil {
+                order.append(id)
+                map[id] = (id, l.accessoryName ?? id, [])
+            }
+            map[id]!.lights.append(l)
+        }
+        return order.map { map[$0]! }
+    }
+
     func refresh() async {
         do {
             let st = try await APIClient.shared.get(XZHomeStatus.self, Endpoint.homekitStatus)
@@ -31,11 +46,12 @@ final class HomeViewModel: ObservableObject {
         isLoaded = true
     }
 
-    /// 直控：power/brightness/colorTemp 任意子集下发，回读据实文案
-    func control(lightKey: String, power: Bool? = nil, brightness: Int? = nil, colorTemp: Int? = nil) async {
+    /// 直控：power/brightness/colorTemp 任意子集下发，回读据实文案（accessoryId 用于跨配件同名键定位）
+    func control(lightKey: String, accessoryId: String? = nil, power: Bool? = nil, brightness: Int? = nil, colorTemp: Int? = nil) async {
         isBusy = true; controlMessage = nil
         defer { isBusy = false }
         var json: [String: Any] = ["light": lightKey]
+        if let accessoryId { json["accessoryId"] = accessoryId }
         if let power { json["power"] = power }
         if let brightness { json["brightness"] = brightness }
         if let colorTemp { json["color_temp"] = colorTemp }
@@ -50,16 +66,17 @@ final class HomeViewModel: ObservableObject {
     }
 
     /// 灯具重命名：后端热更新内存映射 + 持久化 config.json（改名后语音播报/工具描述同步），成功后刷新列表
-    func rename(lightKey: String, name: String) async {
+    func rename(lightKey: String, accessoryId: String? = nil, name: String) async {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !lightKey.isEmpty, !n.isEmpty else {
             controlMessage = "✗ 名称不能为空"; return
         }
         isBusy = true; controlMessage = nil
         defer { isBusy = false }
+        var payload: [String: Any] = ["light": lightKey, "name": n]
+        if let accessoryId { payload["accessoryId"] = accessoryId }
         do {
-            let ack = try await APIClient.shared.postJSON(XZHomeRenameAck.self, Endpoint.homekitRename,
-                                                          json: ["light": lightKey, "name": n])
+            let ack = try await APIClient.shared.postJSON(XZHomeRenameAck.self, Endpoint.homekitRename, json: payload)
             if ack.ok == true {
                 controlMessage = "✓ 已重命名为「\(ack.name ?? n)」" + (ack.persisted == true ? "（已持久化）" : "")
                 await refresh()

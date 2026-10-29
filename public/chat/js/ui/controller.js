@@ -703,6 +703,9 @@ class UIController {
             practiceOff: 'modeKwPracticeOff',
             practiceEndManual: 'modeKwPracticeEndManual',
             practiceEndAuto: 'modeKwPracticeEndAuto',
+            intercomOn: 'modeKwIntercomOn',
+            intercomOff: 'modeKwIntercomOff',
+            intercomCall: 'modeKwIntercomCall',
         };
         try {
             const res = await fetch((location.pathname.startsWith('/xiaozhi') ? '/xiaozhi' : '') + '/api/settings/mode-keywords');
@@ -732,6 +735,9 @@ class UIController {
                 practiceOff: toArray('modeKwPracticeOff'),
                 practiceEndManual: toArray('modeKwPracticeEndManual'),
                 practiceEndAuto: toArray('modeKwPracticeEndAuto'),
+                intercomOn: toArray('modeKwIntercomOn'),
+                intercomOff: toArray('modeKwIntercomOff'),
+                intercomCall: toArray('modeKwIntercomCall'),
             }
         };
         try {

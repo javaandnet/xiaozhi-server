@@ -6,7 +6,7 @@ defineProps({
   rows: { type: Array, required: true },
 });
 
-const emit = defineEmits(['select', 'command', 'settings', 'convs', 'remove']);
+const emit = defineEmits(['select', 'speak', 'command', 'settings', 'convs', 'remove']);
 
 const { hwStatusFor } = useRobotStatus();
 </script>
@@ -53,6 +53,11 @@ const { hwStatusFor } = useRobotStatus();
     </el-table-column>
     <el-table-column label="首次接入" min-width="160">
       <template #default="s">{{ fmtTs(s.row.first_seen) }}</template>
+    </el-table-column>
+    <el-table-column label="语音广播" width="100" align="center">
+      <template #default="s">
+        <el-button class="op-btn" size="small" type="primary" plain @click="emit('speak', s.row)">📢广播</el-button>
+      </template>
     </el-table-column>
     <el-table-column label="操作" width="340" fixed="right">
       <template #default="s">

@@ -23,7 +23,7 @@ struct RootView: View {
                 .tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right") }
 
             SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape2") }
+                .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .task { devicesVM.start() }
         .onChange(of: settings.serverEnv) { _, _ in

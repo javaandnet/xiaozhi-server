@@ -10,10 +10,11 @@ import { fmtTs } from '@/composables/useFormat';
 import DeviceCommandDialog from '@/components/devices/DeviceCommandDialog.vue';
 import FaceWizardDialog from '@/components/masterpi/FaceWizardDialog.vue';
 import FaceEditDialog from '@/components/masterpi/FaceEditDialog.vue';
+import RobotGamepad from '@/components/masterpi/RobotGamepad.vue';
 
 const { state: robotStatus, robotBodies, load: loadRobotStatus } = useRobotStatus();
 const { known, load: loadKnown } = useKnownDevices();
-const { mpStream, refresh: refreshStream, start: startStream, stop: stopStream } = useFaceStream();
+const { refresh: refreshStream } = useFaceStream();
 const {
   faces,
   mpBodyReady,
@@ -115,35 +116,11 @@ onBeforeUnmount(unregister);
   <el-card class="card" shadow="never">
     <template #header>
       <div style="display: flex; align-items: center; gap: 10px">
-        <b>📹 摄像头实时画面（人脸检测调试）</b>
-        <el-tag size="small" :type="mpStream.running ? 'success' : 'info'" effect="plain">
-          {{ mpStream.running ? '运行中' : '未运行' }}
-        </el-tag>
+        <b>🎮 遥控（游戏手柄）</b>
+        <span class="hint">左柄底盘 · 中间实时画面 · 右柄云台 · 底部连续动作</span>
       </div>
     </template>
-    <div class="hint" style="margin-bottom: 10px">
-      按需启动派上 <span class="mono">vision_stream.py</span> 的 MJPEG 预览：绿框=检出人脸，红框+黄点=目标(最大)脸，白十字=画面中心，<span class="mono">ex/ey</span>
-      为归一化偏差（tol=±0.14 判居中）。检测器已升级为 <b>DNN(YuNet)</b>（印刷/卡通脸不再误检）。预览运行时相机由本进程独占，<span class="mono">search_face</span>
-      会自动<b>借用本预览的检测框</b>（走 <span class="mono">/frames</span> 端点），两者可同时进行；预览未启动时 search_face 回退自行开相机。
-    </div>
-    <div class="row" style="margin-bottom: 12px">
-      <el-button size="small" type="primary" :loading="mpStream.loading" :disabled="mpStream.running" @click="startStream">
-        ▶ 启动预览
-      </el-button>
-      <el-button size="small" :loading="mpStream.loading" :disabled="!mpStream.running" @click="stopStream">
-        ■ 停止
-      </el-button>
-      <el-button size="small" text @click="refreshStream">⟳ 刷新状态</el-button>
-      <a v-if="mpStream.url" :href="mpStream.url" target="_blank" class="hint">独立窗口打开 {{ mpStream.url }} ↗</a>
-    </div>
-    <div v-if="mpStream.running" style="text-align: center">
-      <img
-        :src="mpStream.imgSrc"
-        style="max-width: 100%; border: 1px solid var(--el-border-color); border-radius: 6px"
-        alt="stream"
-      />
-    </div>
-    <div v-else class="hint">（预览未启动 — 点击上方“启动预览”，画面出现在此处）</div>
+    <RobotGamepad />
   </el-card>
 
   <el-card class="card" shadow="never">
@@ -215,19 +192,21 @@ onBeforeUnmount(unregister);
       <el-table-column label="ID" width="110">
         <template #default="s"><span class="mono">{{ s.row.id }}</span></template>
       </el-table-column>
-      <el-table-column label="称呼" min-width="120">
+      <el-table-column label="称呼" width="140">
         <template #default="s"><b>{{ s.row.name }}</b></template>
       </el-table-column>
       <el-table-column label="样本数" width="80">
         <template #default="s">{{ s.row.samples }}</template>
       </el-table-column>
+      <!-- 弹性空列：宽屏下吸收剩余宽度，避免数据列被拉伸错位 -->
+      <el-table-column min-width="40" />
       <el-table-column label="登记时间" width="170">
         <template #default="s"><span class="mono">{{ fmtTs(s.row.created_at) }}</span></template>
       </el-table-column>
       <el-table-column label="最近更新" width="170">
         <template #default="s"><span class="mono">{{ fmtTs(s.row.updated_at) }}</span></template>
       </el-table-column>
-      <el-table-column label="操作" width="240" fixed="right">
+      <el-table-column label="操作" width="250" fixed="right">
         <template #default="s">
           <el-button size="small" type="success" plain @click="openWizard('append', s.row)">➕ 追加样本</el-button>
           <el-button size="small" plain @click="editRef.open(s.row)">✏️ 编辑</el-button>
@@ -240,7 +219,7 @@ onBeforeUnmount(unregister);
   </el-card>
 
   <el-card class="card" shadow="never">
-    <template #header><b>🤖 MasterPi 连接服务器（主 / 备）</b></template>
+    <template #header><b>🤖 MasterPi服务器（主 / 备）</b></template>
     <div class="hint" style="margin-bottom: 10px">
       直写派（<span class="mono">{{ mp.user }}@{{ mp.host }}</span>）本地
       <span class="mono">~/masterpi_client/config.json</span> 的 server 块；保存后自动重启 systemd 客户端。客户端断线会重连并依次尝试主→备，<b>切到备后不自动回主</b>（直到进程重启）。

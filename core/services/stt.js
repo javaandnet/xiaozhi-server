@@ -1241,9 +1241,9 @@ class SttService extends BaseService {
     }
 
     try {
-      // 解码Opus为PCM
+      // 解码Opus为PCM（调用方显式声明 pcm 时跳过嗅探，避免裸 PCM 被误判为 Opus）
       let pcmData = audioData;
-      if (opts.format === 'opus' || this._isOpusData(audioData)) {
+      if (opts.format !== 'pcm' && (opts.format === 'opus' || this._isOpusData(audioData))) {
         pcmData = this._decodeOpus(audioData);
       }
 
@@ -1251,6 +1251,7 @@ class SttService extends BaseService {
 
       return {
         text: result.text,
+        rawText: result.rawText || result.text,
         confidence: result.confidence || 0.9,
         duration: result.duration || 0,
         provider: this.provider,

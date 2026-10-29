@@ -5,6 +5,7 @@ import Combine
 /// - serverEnv ：接入环境档（局域网 / 公网服务器 / 自定义），存 UserDefaults；
 /// - customServer：自定义档手填地址（切到 custom 即生效）；
 /// - voiceKey ：对应服务端 config.voiceFlow.token，用于 /api/voice/* 鉴权，存 Keychain。
+/// - peerKey ：对应服务端 config.peer.key，外出（连云端 hub）时相机帧中继鉴权用，存 Keychain。
 /// 地址与档位的持久化、解析全部收口到 AppConfig，本类只做 UI 绑定与即时回读。
 @MainActor
 final class SettingsStore: ObservableObject {
@@ -18,11 +19,18 @@ final class SettingsStore: ObservableObject {
             else { KeychainStore.set(account: "voiceKey", value: voiceKey) }
         }
     }
+    @Published var peerKey: String {
+        didSet {
+            if peerKey.isEmpty { KeychainStore.delete(account: "peerKey") }
+            else { KeychainStore.set(account: "peerKey", value: peerKey) }
+        }
+    }
 
     private init() {
         serverEnv = AppConfig.env
         customServer = AppConfig.customServerURL?.absoluteString ?? ""
         voiceKey = KeychainStore.get(account: "voiceKey") ?? ""
+        peerKey = KeychainStore.get(account: "peerKey") ?? ""
     }
 
     /// 当前生效服务根地址（不含尾斜杠），按档解析
@@ -48,6 +56,7 @@ final class SettingsStore: ObservableObject {
         AppConfig.setEnv(.builtin)
         AppConfig.setCustomServer("")
         voiceKey = ""
+        peerKey = ""
         serverEnv = AppConfig.env
         customServer = ""
     }
@@ -58,6 +67,11 @@ final class SettingsStore: ObservableObject {
 enum ClientSettings {
     static var voiceKey: String {
         KeychainStore.get(account: "voiceKey") ?? ""
+    }
+
+    /// 互联密钥：外出读云端帧中继画面时作为 X-Peer-Key 头下发
+    static var peerKey: String {
+        KeychainStore.get(account: "peerKey") ?? ""
     }
 
     /// 当前生效服务根地址（按档动态解析，改设置即时生效）

@@ -3,6 +3,7 @@
 > 派端(192.168.1.91)厂商 SDK 位于 `~/MasterPi/`。本文件整理官方提供的全部能力示例、安全分级（底盘红线），
 > 以及本项目 `masterpi_client` 已接线/未接线对照，便于后续按需调用。
 > 派上无独立 README/PDF，官方"文档"即 `~/MasterPi/command` 命令清单 + 各脚本中英注释 + PC 上位机。
+> 已定案故障的取证步骤与复发判定见 `doc/TROUBLESHOOTING.md`（相机 USB 掉盘/底盘方向/僵尸连接）。
 > 代码真源：`masterpi/tools.py`（MCP schema）、`masterpi/robot.py`（动作实现）、`masterpi/vision.py`（视觉）。
 
 ## 一、安全红线（贯穿全部）
@@ -18,7 +19,7 @@
 | 功能 | 文件 | 执行器 | 红线 | 本项目 |
 |---|---|---|:---:|---|
 | 颜色识别 | `color_detect.py` | 纯相机 | ✅ 安全 | ✅ 已接线 `robot_color_detect` |
-| 颜色分拣（臂抓色块） | `color_sorting.py` | 相机+**机械臂** | ✅ 安全(臂可动) | ⏳ 未做（组合 pick/place+IK，工程量大） |
+| 颜色分拣（臂抓色块） | `color_sorting.py` | 相机+**机械臂** | ✅ 安全(臂可动) | ✅ 抽取夹爪参数已接 `robot_grasp`（手喂坐标）；“看色块→自动定位坐标”仍需手眼标定 |
 | 目标追踪 | `color_tracking.py` | **麦轮 PID 跟随** + s1 躯干 | ❌ 动车轮 | ⛔ 不做（违反红线；如需无轮追踪另用 s6/s3 改造） |
 | 智能巡线 | `visual_patrol.py` | 相机+**麦轮** | ❌ 动车轮 | ⛔ 不做 |
 | 智能避障 | `avoidance.py` | 超声+**麦轮** | ❌ 动车轮 | ⛔ 不做 |
@@ -50,9 +51,9 @@
   - 本项目暂未起该服务；如需在 studio 内看机器人实时画面，可后续把它 systemd 常驻 + studio 内嵌 `<img>`（非工具，纯服务）。
 - `masterpi_pc_software/` — PC 端图形化上位机（`Arm.py`），仅供厂商手动调试，非服务端能力。
 
-## 三、本项目 MCP 工具总览（`masterpi/tools.py`，23 个）
+## 三、本项目 MCP 工具总览（`masterpi/tools.py`，25 个）
 
-- 身体/动作：`robot_arm_pose`(11 语义动作) · `robot_arm_ik`(坐标摆放) · `robot_beep` · `robot_face_align`(相机云台 s3 俯仰/s6 水平微调，**studio 登记向导直调**，只动云台绝不碰轮子)
+- 身体/动作：`robot_arm_pose`(11 语义动作) · `robot_arm_ik`(坐标摆放) · `robot_press`(三段 IK 点按：悬停→下压→抬起，手动坐标探测精度，默认不入语音目录) · `robot_grasp`(夹爪抓取宏：servo1 开2000/1500 夹，手动坐标练精确抓取，默认不入语音目录) · `robot_beep` · `robot_face_align`(相机云台 s3 俯仰/s6 水平微调，**studio 登记向导直调**，只动云台绝不碰轮子)
 - 感知/问答：`robot_search_face`(巡视+对准+识人，命中报 `person`/`person_id` 并上报 `face_found` 事件) · `robot_face_enroll`(引导式登记) · `robot_face_recognize`(单次识人) · `robot_face_list` · `robot_face_rename`(改 ID/称呼) · `robot_face_login`(人脸登录) · `robot_face_logout` · `robot_face_delete` · `robot_color_detect` · `robot_camera_snapshot` · `robot_take_photo`(挂起)
 - 传感器：`robot_get_battery` · `robot_get_distance`(需接 I2C 模块)
 - 灯光：`robot_set_rgb`(串口)

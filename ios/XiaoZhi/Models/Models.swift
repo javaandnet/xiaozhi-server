@@ -8,8 +8,14 @@ struct XZHealth: Decodable {
     let channel: String?
     let devices: Int?
     let uptime: Double?
+    let peer: XZPeerInfo?
 
     var isOK: Bool { status == "ok" }
+}
+
+/// /health 的互联段：role == "hub" 表示连的是云端实例（画面走帧中继）
+struct XZPeerInfo: Decodable {
+    let role: String?
 }
 
 // MARK: - 实时在线设备（GET /api/devices，device.toJSON() 口径，camelCase）
@@ -262,6 +268,35 @@ struct XZDeviceCommandAck: Decodable {
     let error: String?
 }
 
+/// POST /api/masterpi/speak 回执（发送语音：文字播报到身体绑定的小智设备）
+struct XZSpeakAck: Decodable {
+    let ok: Bool?
+    let accepted: Bool?
+    let deviceId: String?
+    let devices: Int?
+    let error: String?
+}
+
+/// POST /api/masterpi/ik/jog 回执（微调基准由 server 统一维护，pose 为本次实际到位）
+struct XZIkJogAck: Decodable {
+    struct Pose: Decodable {
+        let x: Double
+        let y: Double
+        let z: Double
+    }
+    let ok: Bool?
+    let pose: Pose?
+    let needHome: Bool?
+    let error: String?
+}
+
+/// POST /api/masterpi/reconnect：SSH 重启派侧 client（僵尸连接假在线时一键自愈）
+struct XZReconnectAck: Decodable {
+    let ok: Bool?
+    let active: String?
+    let error: String?
+}
+
 // MARK: - MasterPi 人脸登记
 
 /// GET/POST /api/masterpi/stream/*：预览流状态（url 为树莓派 MJPEG 基址，图为 url+"stream"）
@@ -270,6 +305,8 @@ struct XZStreamStatus: Decodable {
     let running: Bool?
     let port: Int?
     let url: String?
+    let mode: String?
+    let faces: Int?
     let error: String?
 
     /// 拼出供 WKWebView 直读的 MJPEG 地址（带时间戳防缓存）
@@ -278,6 +315,42 @@ struct XZStreamStatus: Decodable {
         let normalized = base.hasSuffix("/") ? base : base + "/"
         return normalized + "stream?_=" + String(Int(Date().timeIntervalSince1970 * 1000))
     }
+}
+
+/// 通用 ok/error 回执（stream mode start stop shutdown 等）
+struct XZAck: Decodable {
+    let ok: Bool?
+    let mode: String?
+    let error: String?
+}
+
+/// 底盘安全开关（GET/POST /api/masterpi/safety）
+struct XZSafetyAck: Decodable {
+    let ok: Bool?
+    let allowChassis: Bool?
+    let error: String?
+}
+
+/// 看家事件（vision_stream watch 变化检测：{ts, ratio, shot}）
+struct XZWatchEvent: Decodable, Identifiable, Hashable {
+    let ts: Double?
+    let ratio: Double?
+    let shot: String?
+    var id: String { shot ?? String(ts ?? 0) }
+
+    var timeText: String {
+        guard let ts else { return "-" }
+        let d = Date(timeIntervalSince1970: ts)
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm:ss"
+        return f.string(from: d)
+    }
+}
+
+struct XZWatchEvents: Decodable {
+    let ok: Bool?
+    let events: [XZWatchEvent]?
+    let error: String?
 }
 
 /// 人脸库成员（face_db list）
@@ -331,13 +404,15 @@ struct XZFaceLoginResult: Decodable {
 
 // MARK: - 家庭设备（HomeKit）
 
-/// GET /api/homekit/status 的可控灯具
+/// GET /api/homekit/status 的可控灯具（key 仅在单个配件内唯一，跨配件可重名，控制须带 accessoryId）
 struct XZHomeLight: Decodable, Identifiable, Hashable {
     let key: String?
     let name: String?
+    let accessoryId: String?
+    let accessoryName: String?
     let hasBrightness: Bool?
     let hasColorTemp: Bool?
-    var id: String { key ?? UUID().uuidString }
+    var id: String { "\(accessoryId ?? "-")|\(key ?? UUID().uuidString)" }
     var displayName: String { name?.isEmpty == false ? name! : (key ?? "灯") }
 }
 
@@ -359,11 +434,18 @@ struct XZHomeScanDevice: Decodable, Identifiable {
     let port: Int?
     let availableForPairing: Bool?
     let pairedHere: Bool?
+    let lights: [XZHomeLightRef]?   // 本机已索引的可控灯具（供行展开/联动）
 
     enum CodingKeys: String, CodingKey {
-        case accessoryId = "id", name, address, port, availableForPairing, pairedHere
+        case accessoryId = "id", name, address, port, availableForPairing, pairedHere, lights
     }
     var id: String { (accessoryId ?? name ?? UUID().uuidString) + "\(address ?? "")" }
+}
+
+/// 扫描行附带的灯具摘要
+struct XZHomeLightRef: Decodable, Hashable {
+    let key: String?
+    let name: String?
 }
 
 struct XZHomeScanResult: Decodable {
