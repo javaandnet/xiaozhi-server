@@ -237,7 +237,7 @@ onBeforeUnmount(unregister);
     </div>
     <el-form label-width="120px" style="max-width: 640px" @submit.prevent>
       <el-form-item label="主服务器">
-        <el-input v-model="mp.primary" placeholder="ws://192.168.1.55:8003/xiaozhi/v1/" />
+        <el-input v-model="mp.primary" placeholder="ws://192.168.1.11:8003/xiaozhi/v1/" />
       </el-form-item>
       <el-form-item label="备服务器">
         <el-input v-model="mp.backup" placeholder="留空=不启用备份；如 ws://192.168.1.60:8003/xiaozhi/v1/" />

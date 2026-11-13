@@ -35,7 +35,7 @@ struct SettingsView: View {
 
                 // 自定义地址（换 Mac IP、临时指向别的机器）
                 Section {
-                    TextField("服务器地址", text: $server, prompt: Text("如 192.168.1.55:8003"))
+                    TextField("服务器地址", text: $server, prompt: Text("如 192.168.1.11:8003"))
                         .font(.system(.footnote, design: .monospaced))
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .keyboardType(.URL)

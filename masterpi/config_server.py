@@ -216,7 +216,7 @@ INDEX_HTML = """<!doctype html>
  <div class="sub">Primary server is tried first; on repeated failures it fails over to Backup (one-way, no switch-back until restart).</div>
  <div id="tokenBox"><label>Access Token</label><input id="token" type="password" placeholder="leave empty if not required"></div>
  <label>Primary server (ws:// or wss://)</label>
- <input id="primary" placeholder="ws://192.168.1.55:8003/xiaozhi/v1/">
+ <input id="primary" placeholder="ws://192.168.1.11:8003/xiaozhi/v1/">
  <label>Backup server (optional)</label>
  <input id="backup" placeholder="wss://cloud-host:8003/xiaozhi/v1/  (empty = disabled)">
  <label>Device name</label>

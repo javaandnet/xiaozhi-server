@@ -36,7 +36,7 @@ export const studioConfig = {
   manageDir: fw.manageDir || path.join(root, 'data'),
   deviceDb: process.env.XZ_DB_PATH || fw.deviceDb || path.join(root, 'data', 'xz.db'),
   serialGlob: fw.serialGlob || '/dev/cu.usb*',
-  otaUrl: fw.otaUrl || 'http://192.168.1.55:8003/xiaozhi/ota/',
+  otaUrl: fw.otaUrl || 'http://192.168.1.11:8003/xiaozhi/ota/',
   otaUrlFallback: fw.otaUrlFallback || '',
   buildTimeoutMs: Number(fw.buildTimeoutMs) || 1800000,
   // MasterPi (option A): SSH target for the studio "连接设定" page to patch the

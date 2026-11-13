@@ -1,9 +1,9 @@
 {
   "server": {
-    "primary": "ws://192.168.1.55:8003/xiaozhi/v1/",
+    "primary": "ws://192.168.1.11:8003/xiaozhi/v1/",
     "backup": ""
   },
-  "wsUrl": "ws://192.168.1.55:8003/xiaozhi/v1/",
+  "wsUrl": "ws://192.168.1.11:8003/xiaozhi/v1/",
   "deviceId": "masterpi-0001",
   "clientId": "masterpi-client-0001",
   "deviceName": "MasterPi",

@@ -41,7 +41,7 @@ targets:
         UILaunchScreen: {}
         # xiaozhi-server 根地址（本仓库默认端口 8003）：真机测试指向 Mac 局域网 IP，
         # 需与后端同一 Wi-Fi（服务端 config.host 须为 0.0.0.0）；App 内「设置」页可覆盖此值。
-        XiaoZhiBaseURL: http://192.168.1.55:8003
+        XiaoZhiBaseURL: http://192.168.1.11:8003
         # 公网服务器根地址（局域网档之外的第二服务器）：nginx 反代到 xiaozhi-server，
         # 与 WS 回落 wss://ai.fsr.co.jp/xiaozhi/v1/ 同前缀（HTTP 侧挂 /xiaozhi）；上线前按实际域名调整。
         XiaoZhiCloudBaseURL: https://ai.fsr.co.jp/xiaozhi

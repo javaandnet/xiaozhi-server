@@ -47,7 +47,7 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>XiaoZhiBaseURL</key>
-	<string>http://192.168.1.55:8003</string>
+	<string>http://192.168.1.11:8003</string>
 	<key>XiaoZhiCloudBaseURL</key>
 	<string>https://ai.fsr.co.jp/xiaozhi</string>
 </dict>

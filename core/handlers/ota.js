@@ -50,7 +50,7 @@ class OTAHandler {
         }
       }
     }
-    return '192.168.1.55';
+    return '192.168.1.11';
   }
 
   /**
